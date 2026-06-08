@@ -56,7 +56,10 @@ server.tool(
 
     if (checklist?.length && taskId) {
       for (const item of checklist) {
-        await bx("tasks.task.checklist.add", { taskId, fields: { TITLE: item } });
+        await bx("tasks.task.checklist.add", {
+          taskId,
+          fields: { TITLE: item, PARENT_ID: 0, IS_COMPLETE: "N" }
+        });
       }
     }
 
