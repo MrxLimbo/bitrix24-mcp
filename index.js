@@ -190,4 +190,4 @@ app.get("/health", (_, res) =>
 );
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Bitrix24 MCP Server запущен на порту ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Bitrix24 MCP Server запущен на порту ${PORT}`));
