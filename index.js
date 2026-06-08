@@ -241,6 +241,46 @@ server.tool("send_message",
   }
 );
 
+// ── 8. Найти пользователя ──────────────────────────────────────────────────
+server.tool("find_user",
+  "Найти сотрудника по имени или фамилии и получить его ID для других инструментов.",
+  {
+    name: z.string().describe("Имя или фамилия сотрудника"),
+  },
+  async ({ name }) => {
+    const result = await bx("user.search", { FIND: name });
+    const users = Array.isArray(result) ? result : [];
+    if (!users.length) return { content: [{ type: "text", text: `Сотрудник "${name}" не найден` }] };
+
+    const lines = users.map(u =>
+      `ID: ${u.ID} | ${u.NAME} ${u.LAST_NAME} | ${u.WORK_POSITION || "—"} | ${u.EMAIL || ""}`
+    ).join("\n");
+
+    return { content: [{ type: "text", text: `Найдено (${users.length}):\n\n${lines}` }] };
+  }
+);
+
+// ── 9. Список всех сотрудников ─────────────────────────────────────────────
+server.tool("get_all_users",
+  "Получить список всех активных сотрудников компании с их ID. Нужно чтобы знать ID для фильтрации задач.",
+  {},
+  async () => {
+    const result = await bx("user.get", {
+      filter: { ACTIVE: true },
+      select: ["ID","NAME","LAST_NAME","WORK_POSITION","EMAIL"],
+      order: { NAME: "ASC" },
+    });
+    const users = Array.isArray(result) ? result : [];
+    if (!users.length) return { content: [{ type: "text", text: "Сотрудников нет" }] };
+
+    const lines = users.map(u =>
+      `ID:${u.ID} | ${u.NAME} ${u.LAST_NAME}${u.WORK_POSITION ? ` | ${u.WORK_POSITION}` : ""}`
+    ).join("\n");
+
+    return { content: [{ type: "text", text: `Сотрудники (${users.length}):\n\n${lines}` }] };
+  }
+);
+
 // ── Express + SSE ──────────────────────────────────────────────────────────
 const app = express();
 const sessions = {};
@@ -260,7 +300,7 @@ app.post("/messages", express.json(), async (req, res) => {
 });
 
 app.get("/health", (_, res) =>
-  res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "2.0", tools: 7 })
+  res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "2.1", tools: 9 })
 );
 
 const PORT = process.env.PORT || 3000;
