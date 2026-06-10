@@ -199,6 +199,9 @@ server.tool("get_task",
       `Задача #${t.id}: ${t.title}`,
       `Статус: ${STATUS[t.status] || t.status}`,
       `Приоритет: ${PRIORITY[t.priority] || t.priority}`,
+      t.groupId ? `Проект (group_id): ${t.groupId}` : null,
+      t.responsibleId ? `Ответственный ID: ${t.responsibleId}` : null,
+      t.createdBy ? `Постановщик ID: ${t.createdBy}` : null,
       t.description ? `Описание: ${t.description}` : null,
       t.deadline ? `Дедлайн: ${new Date(t.deadline).toLocaleDateString("ru-RU")}` : null,
     ].filter(Boolean).join("\n");
@@ -516,7 +519,7 @@ app.post("/messages", express.json(), async (req, res) => {
 });
 
 app.get("/health", (_, res) =>
-  res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "3.2", tools: 16 })
+  res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "3.3", tools: 16 })
 );
 
 const PORT = process.env.PORT || 3000;
