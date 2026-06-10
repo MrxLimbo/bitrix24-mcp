@@ -286,12 +286,12 @@ server.tool("find_project",
   "Найти проект/группу в Bitrix24 по названию. Например: 'редстаф', 'railcar', 'redmarket'.",
   { name: z.string().describe("Название проекта или его часть") },
   async ({ name }) => {
-    const result = await bx("socialnetwork.api.workgroup.getList", {
-      filter: { SEARCH: name },
+    const result = await bx("sonet_group.getList", {
+      filter: { NAME: name },
       select: ["ID","NAME","DESCRIPTION","CLOSED","DATE_CREATE"],
+      order: { ID: "DESC" },
     });
-    const groups = result?.workgroups || result || [];
-    const list = Array.isArray(groups) ? groups : Object.values(groups);
+    const list = Array.isArray(result) ? result : Object.values(result || {});
     if (!list.length) return { content: [{ type: "text", text: `Проект "${name}" не найден` }] };
 
     const lines = list.map(g =>
@@ -466,7 +466,7 @@ server.tool("workload_report",
     const result = await bx("tasks.task.list", {
       filter,
       select: ["ID","TITLE","STATUS","PRIORITY","RESPONSIBLE_ID","DEADLINE"],
-      order: { RESPONSIBLE_ID: "ASC" },
+      order: { ACTIVITY_DATE: "DESC" },
     });
 
     const tasks  = result.tasks || [];
@@ -516,7 +516,7 @@ app.post("/messages", express.json(), async (req, res) => {
 });
 
 app.get("/health", (_, res) =>
-  res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "3.1", tools: 16 })
+  res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "3.2", tools: 16 })
 );
 
 const PORT = process.env.PORT || 3000;
