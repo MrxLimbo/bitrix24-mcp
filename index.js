@@ -281,6 +281,222 @@ server.tool("get_all_users",
   }
 );
 
+// ── 10. Найти проект по названию ──────────────────────────────────────────
+server.tool("find_project",
+  "Найти проект/группу в Bitrix24 по названию. Например: 'редстаф', 'railcar', 'redmarket'.",
+  { name: z.string().describe("Название проекта или его часть") },
+  async ({ name }) => {
+    const result = await bx("socialnetwork.api.workgroup.getList", {
+      filter: { SEARCH: name },
+      select: ["ID","NAME","DESCRIPTION","CLOSED","DATE_CREATE"],
+    });
+    const groups = result?.workgroups || result || [];
+    const list = Array.isArray(groups) ? groups : Object.values(groups);
+    if (!list.length) return { content: [{ type: "text", text: `Проект "${name}" не найден` }] };
+
+    const lines = list.map(g =>
+      `ID:${g.ID} | ${g.NAME}${g.CLOSED === "Y" ? " [закрыт]" : " [активен]"}${g.DESCRIPTION ? `\n  ${g.DESCRIPTION}` : ""}`
+    ).join("\n\n");
+
+    return { content: [{ type: "text", text: `Найдено проектов: ${list.length}\n\n${lines}` }] };
+  }
+);
+
+// ── 11. Сводка по проекту ─────────────────────────────────────────────────
+server.tool("get_project_summary",
+  "Полная сводка по проекту — открытые задачи, недавно закрытые, статус. Для запросов типа 'расскажи про проект редстаф'.",
+  {
+    group_id:  z.number().describe("ID проекта (получи через find_project)"),
+    days_back: z.number().optional().describe("За сколько дней смотреть закрытые задачи (по умолчанию 7)"),
+  },
+  async ({ group_id, days_back = 7 }) => {
+    const [openResult, closedResult] = await Promise.all([
+      bx("tasks.task.list", {
+        filter: { GROUP_ID: group_id, "!STATUS": "4" },
+        select: ["ID","TITLE","STATUS","PRIORITY","RESPONSIBLE_ID","DEADLINE"],
+        order: { PRIORITY: "DESC", DEADLINE: "ASC" },
+      }),
+      bx("tasks.task.list", {
+        filter: {
+          GROUP_ID: group_id,
+          STATUS: "4",
+          ">=CLOSED_DATE": new Date(Date.now() - days_back * 86400000).toISOString().split("T")[0],
+        },
+        select: ["ID","TITLE","RESPONSIBLE_ID","CLOSED_DATE"],
+        order: { CLOSED_DATE: "DESC" },
+      }),
+    ]);
+
+    const open   = openResult.tasks   || [];
+    const closed = closedResult.tasks || [];
+    const now    = new Date();
+
+    const overdue = open.filter(t => t.deadline && new Date(t.deadline) < now);
+    const high    = open.filter(t => t.priority === "2");
+
+    let text = `📁 ПРОЕКТ ID:${group_id}\n${"═".repeat(40)}\n\n`;
+    text += `📊 Открытых задач: ${open.length} | Просрочено: ${overdue.length} | Высокий приоритет: ${high.length}\n\n`;
+
+    if (overdue.length) {
+      text += `🚨 ПРОСРОЧЕНО:\n`;
+      overdue.forEach(t => { text += `  [${t.id}] ${t.title} · до ${new Date(t.deadline).toLocaleDateString("ru-RU")}\n`; });
+      text += "\n";
+    }
+
+    if (high.length) {
+      text += `🔴 ВЫСОКИЙ ПРИОРИТЕТ:\n`;
+      high.forEach(t => { text += `  [${t.id}] ${t.title}\n`; });
+      text += "\n";
+    }
+
+    text += `🔄 ВСЕ ОТКРЫТЫЕ (${open.length}):\n`;
+    if (open.length) {
+      open.forEach(t => {
+        const dl  = t.deadline ? ` · до ${new Date(t.deadline).toLocaleDateString("ru-RU")}` : "";
+        const pr  = t.priority === "2" ? " 🔴" : "";
+        text += `  [${t.id}] ${t.title}${pr}${dl} — ${STATUS[t.status] || t.status}\n`;
+      });
+    } else { text += "  Нет открытых задач\n"; }
+
+    text += `\n✅ ЗАКРЫТО ЗА ${days_back} ДНЕЙ (${closed.length}):\n`;
+    if (closed.length) {
+      closed.forEach(t => {
+        const dt = t.closedDate ? new Date(t.closedDate).toLocaleDateString("ru-RU") : "—";
+        text += `  [${t.id}] ${t.title} · закрыта ${dt}\n`;
+      });
+    } else { text += "  Нет закрытых задач за период\n"; }
+
+    return { content: [{ type: "text", text }] };
+  }
+);
+
+// ── 12. Добавить комментарий к задаче ─────────────────────────────────────
+server.tool("add_task_comment",
+  "Добавить комментарий к существующей задаче в Bitrix24.",
+  {
+    task_id: z.number().describe("ID задачи"),
+    comment: z.string().describe("Текст комментария"),
+  },
+  async ({ task_id, comment }) => {
+    await bx("task.commentitem.add", { TASK_ID: task_id, fields: { POST_MESSAGE: comment } });
+    return { content: [{ type: "text", text: `✅ Комментарий добавлен к задаче #${task_id}` }] };
+  }
+);
+
+// ── 13. Прочитать комментарии задачи ──────────────────────────────────────
+server.tool("get_task_comments",
+  "Получить комментарии к задаче — что обсуждали, какие были решения.",
+  { task_id: z.number().describe("ID задачи") },
+  async ({ task_id }) => {
+    const result = await bx("task.commentitem.getList", { TASK_ID: task_id });
+    const comments = Array.isArray(result) ? result : [];
+    if (!comments.length) return { content: [{ type: "text", text: "Комментариев нет" }] };
+
+    const lines = comments.map(c => {
+      const date = c.POST_DATE ? new Date(c.POST_DATE).toLocaleDateString("ru-RU") : "—";
+      return `[${date}] ID:${c.AUTHOR_ID}\n${c.POST_MESSAGE}`;
+    }).join("\n\n─────\n\n");
+
+    return { content: [{ type: "text", text: `Комментарии к задаче #${task_id} (${comments.length}):\n\n${lines}` }] };
+  }
+);
+
+// ── 14. Добавить пункт в чеклист существующей задачи ──────────────────────
+server.tool("add_checklist_item",
+  "Добавить новый пункт в чек-лист уже существующей задачи.",
+  {
+    task_id: z.number().describe("ID задачи"),
+    item:    z.string().describe("Текст пункта чек-листа"),
+  },
+  async ({ task_id, item }) => {
+    await bx("tasks.task.checklist.add", {
+      taskId: task_id,
+      fields: { TITLE: item, PARENT_ID: 0, IS_COMPLETE: "N" },
+    });
+    return { content: [{ type: "text", text: `✅ Пункт добавлен в чек-лист задачи #${task_id}: "${item}"` }] };
+  }
+);
+
+// ── 15. Отчёт по просроченным задачам ─────────────────────────────────────
+server.tool("overdue_report",
+  "Показать все просроченные задачи по всем сотрудникам — кто что не сделал вовремя.",
+  { group_id: z.number().optional().describe("ID проекта для фильтра") },
+  async ({ group_id }) => {
+    const filter = { "<=DEADLINE": new Date().toISOString(), "!STATUS": "4" };
+    if (group_id) filter.GROUP_ID = group_id;
+
+    const result = await bx("tasks.task.list", {
+      filter,
+      select: ["ID","TITLE","STATUS","RESPONSIBLE_ID","DEADLINE","GROUP_ID"],
+      order: { DEADLINE: "ASC" },
+    });
+
+    const tasks = result.tasks || [];
+    if (!tasks.length) return { content: [{ type: "text", text: "✅ Просроченных задач нет!" }] };
+
+    const byUser = {};
+    tasks.forEach(t => {
+      const uid = t.responsibleId || "?";
+      if (!byUser[uid]) byUser[uid] = [];
+      byUser[uid].push(t);
+    });
+
+    let text = `🚨 ПРОСРОЧЕННЫЕ ЗАДАЧИ — всего: ${tasks.length}\n${"═".repeat(40)}\n\n`;
+    for (const [uid, list] of Object.entries(byUser)) {
+      text += `👤 Ответственный ID:${uid} (${list.length} задач)\n`;
+      list.forEach(t => {
+        const days = Math.floor((Date.now() - new Date(t.deadline)) / 86400000);
+        text += `  [${t.id}] ${t.title} · просрочено на ${days} дн.\n`;
+      });
+      text += "\n";
+    }
+
+    return { content: [{ type: "text", text }] };
+  }
+);
+
+// ── 16. Загрузка сотрудников ───────────────────────────────────────────────
+server.tool("workload_report",
+  "Показать загрузку каждого сотрудника — сколько задач у кого, кто перегружен.",
+  { group_id: z.number().optional().describe("ID проекта для фильтра") },
+  async ({ group_id }) => {
+    const filter = { "!STATUS": "4" };
+    if (group_id) filter.GROUP_ID = group_id;
+
+    const result = await bx("tasks.task.list", {
+      filter,
+      select: ["ID","TITLE","STATUS","PRIORITY","RESPONSIBLE_ID","DEADLINE"],
+      order: { RESPONSIBLE_ID: "ASC" },
+    });
+
+    const tasks  = result.tasks || [];
+    const now    = new Date();
+    const byUser = {};
+
+    tasks.forEach(t => {
+      const uid = t.responsibleId || "?";
+      if (!byUser[uid]) byUser[uid] = { total: 0, high: 0, overdue: 0, tasks: [] };
+      byUser[uid].total++;
+      if (t.priority === "2") byUser[uid].high++;
+      if (t.deadline && new Date(t.deadline) < now) byUser[uid].overdue++;
+      byUser[uid].tasks.push(t);
+    });
+
+    const sorted = Object.entries(byUser).sort((a, b) => b[1].total - a[1].total);
+
+    let text = `📊 ЗАГРУЗКА СОТРУДНИКОВ — активных задач: ${tasks.length}\n${"═".repeat(40)}\n\n`;
+    sorted.forEach(([uid, data]) => {
+      const bar = "█".repeat(Math.min(data.total, 10));
+      text += `👤 ID:${uid} ${bar} ${data.total} задач`;
+      if (data.overdue) text += ` | ⚠️ просрочено: ${data.overdue}`;
+      if (data.high)    text += ` | 🔴 высокий приоритет: ${data.high}`;
+      text += "\n";
+    });
+
+    return { content: [{ type: "text", text }] };
+  }
+);
+
 // ── Express + SSE ──────────────────────────────────────────────────────────
 const app = express();
 const sessions = {};
@@ -300,8 +516,8 @@ app.post("/messages", express.json(), async (req, res) => {
 });
 
 app.get("/health", (_, res) =>
-  res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "2.1", tools: 9 })
+  res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "3.0", tools: 16 })
 );
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Bitrix24 OCP MCP v2.0 on port ${PORT}`));
+app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Bitrix24 OCP MCP v3.0 | 16 tools | port ${PORT}`));
