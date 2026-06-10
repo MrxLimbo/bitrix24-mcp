@@ -124,7 +124,7 @@ server.tool("employee_tasks",
     const result = await bx("tasks.task.list", {
       filter,
       select: ["ID","TITLE","STATUS","PRIORITY","DEADLINE","GROUP_ID"],
-      order: { STATUS: "ASC", DEADLINE: "ASC" },
+      order: { ACTIVITY_DATE: "DESC" },
     });
 
     const tasks = result.tasks || [];
@@ -516,7 +516,7 @@ app.post("/messages", express.json(), async (req, res) => {
 });
 
 app.get("/health", (_, res) =>
-  res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "3.0", tools: 16 })
+  res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "3.1", tools: 16 })
 );
 
 const PORT = process.env.PORT || 3000;
