@@ -590,6 +590,12 @@ server.tool("delete_task",
   }
 );
 
+// ── Bot Client IDs ─────────────────────────────────────────────────────────
+const BOT_CLIENTS = {
+  "7358": "9c6yjlcm53b4ixr0v32gbuqz79zgw5ud",
+  "7360": "ugjk1pbwylqhngmj7abkxstdv3pc94lr",
+};
+
 // ── Anthropic Client ───────────────────────────────────────────────────────
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -723,9 +729,10 @@ app.post("/bot", express.urlencoded({ extended: true }), express.json(), async (
     console.log("✅ Claude answer:", answer.slice(0, 100));
 
     await bx("imbot.message.add", {
-      BOT_ID: botId,
+      BOT_ID:    botId,
+      CLIENT_ID: BOT_CLIENTS[botId] || "",
       DIALOG_ID: dialogId,
-      MESSAGE: answer,
+      MESSAGE:   answer,
     });
     console.log("📤 Message sent to Bitrix24");
   } catch (e) {
