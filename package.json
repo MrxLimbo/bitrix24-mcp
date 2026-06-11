@@ -1,4 +1,4 @@
-json
+
 {
   "name": "bitrix24-mcp",
   "version": "1.0.0",
@@ -16,6 +16,3 @@ json
     "node": ">=18"
   }
 }
-```
-
-Нажми **Commit changes**.
