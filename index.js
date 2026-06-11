@@ -313,14 +313,6 @@ server.tool("find_project",
 
     return { content: [{ type: "text", text: `Найдено: ${list.length}\n\n${lines}` }] };
   }
-    if (!list.length) return { content: [{ type: "text", text: `Проект "${name}" не найден` }] };
-
-    const lines = list.map(g =>
-      `ID:${g.ID} | ${g.NAME}${g.CLOSED === "Y" ? " [закрыт]" : " [активен]"}${g.DESCRIPTION ? `\n  ${g.DESCRIPTION}` : ""}`
-    ).join("\n\n");
-
-    return { content: [{ type: "text", text: `Найдено проектов: ${list.length}\n\n${lines}` }] };
-  }
 );
 
 // ── 11. Сводка по проекту ─────────────────────────────────────────────────
