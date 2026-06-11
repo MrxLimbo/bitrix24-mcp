@@ -117,11 +117,11 @@ server.tool("manager_dashboard",
     if (!tasks.length) return { content: [{ type: "text", text: "Задач нет" }] };
 
     const now = new Date();
-    const overdue   = tasks.filter(t => t.deadline && new Date(t.deadline) < now && t.status !== "4");
-    const highPrio  = tasks.filter(t => t.priority === "2" && t.status !== "4");
+    const overdue    = tasks.filter(t => t.deadline && new Date(t.deadline) < now && t.status !== "4");
+    const highPrio   = tasks.filter(t => t.priority === "2" && t.status !== "4");
     const inProgress = tasks.filter(t => t.status === "2");
-    const newTasks  = tasks.filter(t => t.status === "1");
-    const done      = tasks.filter(t => t.status === "4");
+    const newTasks   = tasks.filter(t => t.status === "1");
+    const done       = tasks.filter(t => t.status === "4");
 
     const fmt = (t) => {
       const dl = t.deadline ? ` · до ${new Date(t.deadline).toLocaleDateString("ru-RU")}` : "";
@@ -131,12 +131,8 @@ server.tool("manager_dashboard",
 
     let text = `📊 ДАШБОРД ОЦП — всего задач: ${tasks.length}\n${"═".repeat(44)}\n\n`;
 
-    if (overdue.length) {
-      text += `🚨 ПРОСРОЧЕНО (${overdue.length}):\n${overdue.map(fmt).join("\n")}\n\n`;
-    }
-    if (highPrio.length) {
-      text += `🔴 ВЫСОКИЙ ПРИОРИТЕТ (${highPrio.length}):\n${highPrio.map(fmt).join("\n")}\n\n`;
-    }
+    if (overdue.length)   text += `🚨 ПРОСРОЧЕНО (${overdue.length}):\n${overdue.map(fmt).join("\n")}\n\n`;
+    if (highPrio.length)  text += `🔴 ВЫСОКИЙ ПРИОРИТЕТ (${highPrio.length}):\n${highPrio.map(fmt).join("\n")}\n\n`;
     text += `🔄 В РАБОТЕ (${inProgress.length}):\n${inProgress.length ? inProgress.map(fmt).join("\n") : "  —"}\n\n`;
     text += `🆕 НОВЫЕ (${newTasks.length}):\n${newTasks.length ? newTasks.map(fmt).join("\n") : "  —"}\n\n`;
     text += `✅ ЗАВЕРШЕНЫ (${done.length})\n`;
@@ -235,11 +231,11 @@ server.tool("get_task",
       `Задача #${t.id}: ${t.title}`,
       `Статус: ${STATUS[t.status] || t.status}`,
       `Приоритет: ${PRIORITY[t.priority] || t.priority}`,
-      t.groupId ? `Проект (group_id): ${t.groupId}` : null,
+      t.groupId       ? `Проект (group_id): ${t.groupId}`     : null,
       t.responsibleId ? `Ответственный ID: ${t.responsibleId}` : null,
-      t.createdBy ? `Постановщик ID: ${t.createdBy}` : null,
-      t.description ? `Описание: ${t.description}` : null,
-      t.deadline ? `Дедлайн: ${new Date(t.deadline).toLocaleDateString("ru-RU")}` : null,
+      t.createdBy     ? `Постановщик ID: ${t.createdBy}`       : null,
+      t.description   ? `Описание: ${t.description}`           : null,
+      t.deadline      ? `Дедлайн: ${new Date(t.deadline).toLocaleDateString("ru-RU")}` : null,
     ].filter(Boolean).join("\n");
     return { content: [{ type: "text", text: lines }] };
   }
@@ -257,9 +253,9 @@ server.tool("update_task",
   },
   async ({ task_id, status, priority, deadline, responsible_id }) => {
     const fields = {};
-    if (status)         fields.STATUS        = status;
-    if (priority)       fields.PRIORITY      = priority;
-    if (deadline)       fields.DEADLINE      = deadline + "T23:59:00+06:00";
+    if (status)         fields.STATUS         = status;
+    if (priority)       fields.PRIORITY       = priority;
+    if (deadline)       fields.DEADLINE       = deadline + "T23:59:00+06:00";
     if (responsible_id) fields.RESPONSIBLE_ID = responsible_id;
 
     await bx("tasks.task.update", { taskId: task_id, fields });
@@ -325,18 +321,15 @@ server.tool("find_project",
   "Найти проект/группу в Bitrix24 по названию. Например: 'редстаф', 'railcar', 'redmarket'.",
   { name: z.string().describe("Название проекта или его часть") },
   async ({ name }) => {
-    // Сначала ищем в словаре известных проектов
     const search = name.toLowerCase().trim();
     const known = PROJECTS[search];
     if (known) {
       return { content: [{ type: "text", text: `✅ Найден: ${known.name} | GROUP_ID: ${known.id}` }] };
     }
-    // Частичное совпадение
     const partial = Object.entries(PROJECTS).find(([key]) => key.includes(search) || search.includes(key));
     if (partial) {
       return { content: [{ type: "text", text: `✅ Найден: ${partial[1].name} | GROUP_ID: ${partial[1].id}` }] };
     }
-    // Показываем все известные проекты
     const list = [...new Set(Object.values(PROJECTS).map(p => `ID:${p.id} | ${p.name}`))].join("\n");
     return { content: [{ type: "text", text: `Проект "${name}" не найден.\n\nИзвестные проекты:\n${list}` }] };
   }
@@ -392,8 +385,8 @@ server.tool("get_project_summary",
     text += `🔄 ВСЕ ОТКРЫТЫЕ (${open.length}):\n`;
     if (open.length) {
       open.forEach(t => {
-        const dl  = t.deadline ? ` · до ${new Date(t.deadline).toLocaleDateString("ru-RU")}` : "";
-        const pr  = t.priority === "2" ? " 🔴" : "";
+        const dl = t.deadline ? ` · до ${new Date(t.deadline).toLocaleDateString("ru-RU")}` : "";
+        const pr = t.priority === "2" ? " 🔴" : "";
         text += `  [${t.id}] ${t.title}${pr}${dl} — ${STATUS[t.status] || t.status}\n`;
       });
     } else { text += "  Нет открытых задач\n"; }
@@ -437,7 +430,7 @@ server.tool("get_task_comments",
     if (!comments.length) return { content: [{ type: "text", text: "Комментариев нет" }] };
 
     const lines = comments.map(c => {
-      const date = c.POST_DATE ? new Date(c.POST_DATE).toLocaleDateString("ru-RU") : "—";
+      const date   = c.POST_DATE ? new Date(c.POST_DATE).toLocaleDateString("ru-RU") : "—";
       const author = c.AUTHOR_ID ? `ID:${c.AUTHOR_ID}` : "—";
       return `[${date}] ${author}\n${c.POST_MESSAGE || "—"}`;
     }).join("\n\n─────\n\n");
@@ -550,12 +543,10 @@ server.tool("get_collab_chat",
     limit:    z.number().optional().describe("Количество последних сообщений (по умолчанию 20)"),
   },
   async ({ group_id, limit = 20 }) => {
-    // Получаем чат группы через DIALOG_ID = SG{group_id}
     const chatInfo = await bx("im.chat.get", { DIALOG_ID: `SG${group_id}` });
     const chatId = chatInfo?.id || chatInfo?.ID;
     if (!chatId) return { content: [{ type: "text", text: `Чат для коллаба ID:${group_id} не найден` }] };
 
-    // Читаем сообщения
     const result = await bx("im.message.getList", {
       CHAT_ID: chatId,
       LAST_N: limit,
@@ -570,13 +561,25 @@ server.tool("get_collab_chat",
     if (!messages.length) return { content: [{ type: "text", text: "Сообщений нет" }] };
 
     const lines = messages.map(m => {
-      const date = m.DATE ? new Date(m.DATE).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—";
+      const date   = m.DATE ? new Date(m.DATE).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—";
       const author = m.AUTHOR_ID ? `ID:${m.AUTHOR_ID}` : "—";
-      const text = m.MESSAGE || m.TEXT || "—";
+      const text   = m.MESSAGE || m.TEXT || "—";
       return `[${date}] ${author}:\n${text}`;
     }).join("\n\n");
 
     return { content: [{ type: "text", text: `💬 Чат коллаба ID:${group_id} (последние ${messages.length} сообщений):\n${"─".repeat(36)}\n\n${lines}` }] };
+  }
+);
+
+// ── 18. Удалить задачу ────────────────────────────────────────────────────
+server.tool("delete_task",
+  "Удалить задачу из Bitrix24 по её ID. Внимание: действие необратимо.",
+  {
+    task_id: z.number().describe("ID задачи для удаления"),
+  },
+  async ({ task_id }) => {
+    await bx("tasks.task.delete", { taskId: task_id });
+    return { content: [{ type: "text", text: `✅ Задача #${task_id} удалена` }] };
   }
 );
 
@@ -601,7 +604,6 @@ async function buildContext(message, userId) {
   let context = "";
 
   try {
-    // Ищем упоминание проекта
     for (const [key, proj] of Object.entries(PROJECTS)) {
       if (msg.includes(key)) {
         const result = await bx("tasks.task.list", {
@@ -622,7 +624,6 @@ async function buildContext(message, userId) {
       }
     }
 
-    // Мои задачи
     if (!context && (msg.includes("мои задач") || msg.includes("my task") || msg.includes("мои"))) {
       const result = await bx("tasks.task.list", {
         filter: { RESPONSIBLE_ID: parseInt(userId), "!STATUS": "4" },
@@ -636,7 +637,6 @@ async function buildContext(message, userId) {
         ).join("\n");
     }
 
-    // Просроченные
     if (!context && (msg.includes("просроч") || msg.includes("горит") || msg.includes("overdue"))) {
       const result = await bx("tasks.task.list", {
         filter: { "<=DEADLINE": new Date().toISOString(), "!STATUS": "4" },
@@ -663,17 +663,17 @@ const sessions = {};
 
 // ── Bot endpoint ────────────────────────────────────────────────────────────
 app.post("/bot", express.urlencoded({ extended: true }), express.json(), async (req, res) => {
-  res.status(200).send("OK"); // Всегда 200 чтобы Bitrix24 не повторял
+  res.status(200).send("OK");
 
-  const body = req.body;
+  const body  = req.body;
   const event = body.event || body.EVENT;
   if (event !== "ONIMBOTMESSAGEADD") return;
 
-  const data    = body.data || body.DATA || {};
-  const botId   = data.BOT_ID;
+  const data     = body.data || body.DATA || {};
+  const botId    = data.BOT_ID;
   const dialogId = data.DIALOG_ID;
-  const userId  = data.USER_ID;
-  const message = data.MESSAGE;
+  const userId   = data.USER_ID;
+  const message  = data.MESSAGE;
 
   if (!message || !dialogId || !botId) return;
 
@@ -722,8 +722,8 @@ app.post("/messages", express.json(), async (req, res) => {
 });
 
 app.get("/health", (_, res) =>
-  res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "5.0", tools: 17, bot: true })
+  res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "5.0", tools: 18, bot: true })
 );
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Bitrix24 OCP MCP v3.0 | 16 tools | port ${PORT}`));
+app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Bitrix24 OCP MCP v3.0 | 18 tools | port ${PORT}`));
