@@ -687,9 +687,18 @@ app.post("/bot", express.urlencoded({ extended: true }), express.json(), async (
   }
 
   const data     = body.data || body.DATA || {};
-  const botRaw   = data.BOT;
-  const botId    = typeof botRaw === "object" ? botRaw?.ID : botRaw || data.BOT_ID;
   const params   = data.PARAMS || data;
+
+  // BOT = { "7358": { BOT_ID: "7358", BOT_CODE: "..." } }
+  const botRaw   = data.BOT;
+  let botId;
+  if (typeof botRaw === "object" && botRaw !== null) {
+    const firstBot = Object.values(botRaw)[0];
+    botId = firstBot?.BOT_ID || Object.keys(botRaw)[0];
+  } else {
+    botId = botRaw || data.BOT_ID || params.TO_USER_ID;
+  }
+
   const dialogId = params.DIALOG_ID || data.DIALOG_ID;
   const userId   = params.FROM_USER_ID || params.USER_ID || data.USER_ID;
   const message  = params.MESSAGE || data.MESSAGE;
