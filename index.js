@@ -686,11 +686,12 @@ app.post("/bot", express.urlencoded({ extended: true }), express.json(), async (
     return;
   }
 
-  const data    = body.data || body.DATA || {};
-  const botId   = data.BOT_ID;
-  const dialogId = data.DIALOG_ID;
-  const userId  = data.USER_ID;
-  const message = data.MESSAGE;
+  const data     = body.data || body.DATA || {};
+  const botId    = data.BOT?.ID || data.BOT_ID;
+  const params   = data.PARAMS || data;
+  const dialogId = params.DIALOG_ID || data.DIALOG_ID;
+  const userId   = params.FROM_USER_ID || params.USER_ID || data.USER_ID;
+  const message  = params.MESSAGE || data.MESSAGE;
 
   console.log(`💬 Message from ${userId}: "${message}" | botId:${botId} dialogId:${dialogId}`);
 
