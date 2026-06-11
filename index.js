@@ -18,6 +18,41 @@ async function bx(method, params = {}) {
   return data.result;
 }
 
+const PROJECTS = {
+  "redpay":            { id: 80,  name: "RedPay" },
+  "ред пэй":           { id: 80,  name: "RedPay" },
+  "redmarket":         { id: 328, name: "RedMarket" },
+  "ред маркет":        { id: 328, name: "RedMarket" },
+  "маркет":            { id: 328, name: "RedMarket" },
+  "railcar":           { id: 293, name: "RedLogist" },
+  "redlogist":         { id: 293, name: "RedLogist" },
+  "ред логист":        { id: 293, name: "RedLogist" },
+  "логистика":         { id: 293, name: "RedLogist" },
+  "redpro":            { id: 282, name: "RedPro" },
+  "ред про":           { id: 282, name: "RedPro" },
+  "база данных":       { id: 284, name: "База данных ОРН" },
+  "орн":               { id: 284, name: "База данных ОРН" },
+  "оптимум":           { id: 309, name: "Оптимум" },
+  "optimum":           { id: 309, name: "Оптимум" },
+  "кц":                { id: 316, name: "КЦ и запросы" },
+  "кц и запросы":      { id: 316, name: "КЦ и запросы" },
+  "контакт центр":     { id: 316, name: "КЦ и запросы" },
+  "айыл банк":         { id: 323, name: "Айыл банк" },
+  "айылбанк":          { id: 323, name: "Айыл банк" },
+  "pos":               { id: 323, name: "Айыл банк (POS)" },
+  "альфа":             { id: 311, name: "Альфа" },
+  "alpha":             { id: 311, name: "Альфа" },
+  "zero":              { id: 330, name: "Zero RP" },
+  "зеро":              { id: 330, name: "Zero RP" },
+  "намба":             { id: 319, name: "QR Намба" },
+  "namba":             { id: 319, name: "QR Намба" },
+  "qr":                { id: 319, name: "QR Намба" },
+  "smart control":     { id: 290, name: "Smart Control" },
+  "смарт":             { id: 290, name: "Smart Control" },
+  "смарт контрол":     { id: 290, name: "Smart Control" },
+  "оцп":               { id: 290, name: "ОЦП / Smart Control" },
+};
+
 const STATUS = {
   "1": "🆕 Новая", "2": "🔄 В работе", "3": "⏳ В ожидании",
   "4": "✅ Завершена", "5": "⏸️ Отложена", "6": "❌ Просрочена",
@@ -289,39 +324,20 @@ server.tool("find_project",
   "Найти проект/группу в Bitrix24 по названию. Например: 'редстаф', 'railcar', 'redmarket'.",
   { name: z.string().describe("Название проекта или его часть") },
   async ({ name }) => {
-    let list = [];
-    const methods = [
-      { method: "socialnetwork.api.workgroup.getList", params: { select: ["ID","NAME","DESCRIPTION","CLOSED"], order: { ID: "DESC" } } },
-      { method: "sonet_group.getList", params: { select: ["ID","NAME","DESCRIPTION","CLOSED"], order: { ID: "DESC" } } },
-    ];
-
-    for (const { method, params } of methods) {
-      try {
-        const result = await bx(method, params);
-        const items = result?.workgroups || result?.groups || result;
-        if (Array.isArray(items) && items.length > 0) { list = items; break; }
-        if (items && typeof items === "object") {
-          const vals = Object.values(items);
-          if (vals.length > 0) { list = vals; break; }
-        }
-      } catch { continue; }
+    // Сначала ищем в словаре известных проектов
+    const search = name.toLowerCase().trim();
+    const known = PROJECTS[search];
+    if (known) {
+      return { content: [{ type: "text", text: `✅ Найден: ${known.name} | GROUP_ID: ${known.id}` }] };
     }
-
-    if (!list.length) return { content: [{ type: "text", text: `Не удалось получить список проектов. Передай group_id напрямую.` }] };
-
-    const search = name.toLowerCase();
-    const filtered = list.filter(g => g.NAME?.toLowerCase().includes(search));
-
-    if (!filtered.length) {
-      const all = list.map(g => `ID:${g.ID} | ${g.NAME}`).join("\n");
-      return { content: [{ type: "text", text: `Проект "${name}" не найден.\n\nВсе доступные проекты:\n${all}` }] };
+    // Частичное совпадение
+    const partial = Object.entries(PROJECTS).find(([key]) => key.includes(search) || search.includes(key));
+    if (partial) {
+      return { content: [{ type: "text", text: `✅ Найден: ${partial[1].name} | GROUP_ID: ${partial[1].id}` }] };
     }
-
-    const lines = filtered.map(g =>
-      `ID:${g.ID} | ${g.NAME}${g.CLOSED === "Y" ? " [закрыт]" : " [активен]"}${g.DESCRIPTION ? `\n  ${g.DESCRIPTION}` : ""}`
-    ).join("\n\n");
-
-    return { content: [{ type: "text", text: `Найдено: ${filtered.length}\n\n${lines}` }] };
+    // Показываем все известные проекты
+    const list = [...new Set(Object.values(PROJECTS).map(p => `ID:${p.id} | ${p.name}`))].join("\n");
+    return { content: [{ type: "text", text: `Проект "${name}" не найден.\n\nИзвестные проекты:\n${list}` }] };
   }
 );
 
@@ -539,7 +555,7 @@ app.post("/messages", express.json(), async (req, res) => {
 });
 
 app.get("/health", (_, res) =>
-  res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "3.5", tools: 16 })
+  res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "3.9", tools: 16 })
 );
 
 const PORT = process.env.PORT || 3000;
