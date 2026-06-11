@@ -667,6 +667,10 @@ async function buildContext(message, userId) {
   return context;
 }
 
+// ── Express + SSE ──────────────────────────────────────────────────────────
+const app = express();
+const sessions = {};
+
 // ── Bot endpoint ────────────────────────────────────────────────────────────
 app.post("/bot", express.urlencoded({ extended: true }), express.json(), async (req, res) => {
   res.status(200).send("OK");
@@ -725,10 +729,7 @@ app.post("/bot", express.urlencoded({ extended: true }), express.json(), async (
   }
 });
 
-// ── Express + SSE ──────────────────────────────────────────────────────────
-const app = express();
-const sessions = {};
-
+// ── SSE endpoint ──────────────────────────────────────────────────────────
 app.get("/sse", async (req, res) => {
   const transport = new SSEServerTransport("/messages", res);
   sessions[transport.sessionId] = transport;
