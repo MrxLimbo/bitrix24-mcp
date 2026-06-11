@@ -541,6 +541,44 @@ server.tool("workload_report",
   }
 );
 
+// ── 17. Читать переписку в коллабе ────────────────────────────────────────
+server.tool("get_collab_chat",
+  "Прочитать последние сообщения из чата коллаба/рабочей группы в Bitrix24.",
+  {
+    group_id: z.number().describe("ID коллаба/рабочей группы"),
+    limit:    z.number().optional().describe("Количество последних сообщений (по умолчанию 20)"),
+  },
+  async ({ group_id, limit = 20 }) => {
+    // Получаем чат группы через DIALOG_ID = SG{group_id}
+    const chatInfo = await bx("im.chat.get", { DIALOG_ID: `SG${group_id}` });
+    const chatId = chatInfo?.id || chatInfo?.ID;
+    if (!chatId) return { content: [{ type: "text", text: `Чат для коллаба ID:${group_id} не найден` }] };
+
+    // Читаем сообщения
+    const result = await bx("im.message.getList", {
+      CHAT_ID: chatId,
+      LAST_N: limit,
+    });
+
+    const messages = Array.isArray(result?.messages)
+      ? result.messages
+      : result?.messages
+        ? Object.values(result.messages)
+        : [];
+
+    if (!messages.length) return { content: [{ type: "text", text: "Сообщений нет" }] };
+
+    const lines = messages.map(m => {
+      const date = m.DATE ? new Date(m.DATE).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—";
+      const author = m.AUTHOR_ID ? `ID:${m.AUTHOR_ID}` : "—";
+      const text = m.MESSAGE || m.TEXT || "—";
+      return `[${date}] ${author}:\n${text}`;
+    }).join("\n\n");
+
+    return { content: [{ type: "text", text: `💬 Чат коллаба ID:${group_id} (последние ${messages.length} сообщений):\n${"─".repeat(36)}\n\n${lines}` }] };
+  }
+);
+
 // ── Express + SSE ──────────────────────────────────────────────────────────
 const app = express();
 const sessions = {};
@@ -560,7 +598,7 @@ app.post("/messages", express.json(), async (req, res) => {
 });
 
 app.get("/health", (_, res) =>
-  res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "4.0", tools: 16 })
+  res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "4.1", tools: 17 })
 );
 
 const PORT = process.env.PORT || 3000;
