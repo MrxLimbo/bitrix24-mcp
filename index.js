@@ -289,29 +289,39 @@ server.tool("find_project",
   "Найти проект/группу в Bitrix24 по названию. Например: 'редстаф', 'railcar', 'redmarket'.",
   { name: z.string().describe("Название проекта или его часть") },
   async ({ name }) => {
-    // Пробуем разные методы API для рабочих групп
     let list = [];
     const methods = [
-      { method: "socialnetwork.api.workgroup.getList", params: { filter: { NAME: name }, select: ["ID","NAME","DESCRIPTION","CLOSED"] } },
-      { method: "sonet_group.getList", params: { filter: { NAME: `%${name}%` }, select: ["ID","NAME","DESCRIPTION","CLOSED"], order: { ID: "DESC" } } },
+      { method: "socialnetwork.api.workgroup.getList", params: { select: ["ID","NAME","DESCRIPTION","CLOSED"], order: { ID: "DESC" } } },
+      { method: "sonet_group.getList", params: { select: ["ID","NAME","DESCRIPTION","CLOSED"], order: { ID: "DESC" } } },
     ];
 
     for (const { method, params } of methods) {
       try {
         const result = await bx(method, params);
         const items = result?.workgroups || result?.groups || result;
-        if (Array.isArray(items) && items.length >= 0) { list = items; break; }
-        if (typeof items === "object") { list = Object.values(items); break; }
+        if (Array.isArray(items) && items.length > 0) { list = items; break; }
+        if (items && typeof items === "object") {
+          const vals = Object.values(items);
+          if (vals.length > 0) { list = vals; break; }
+        }
       } catch { continue; }
     }
 
-    if (!list.length) return { content: [{ type: "text", text: `Проект "${name}" не найден. Попробуй передать group_id напрямую.` }] };
+    if (!list.length) return { content: [{ type: "text", text: `Не удалось получить список проектов. Передай group_id напрямую.` }] };
 
-    const lines = list.map(g =>
+    const search = name.toLowerCase();
+    const filtered = list.filter(g => g.NAME?.toLowerCase().includes(search));
+
+    if (!filtered.length) {
+      const all = list.map(g => `ID:${g.ID} | ${g.NAME}`).join("\n");
+      return { content: [{ type: "text", text: `Проект "${name}" не найден.\n\nВсе доступные проекты:\n${all}` }] };
+    }
+
+    const lines = filtered.map(g =>
       `ID:${g.ID} | ${g.NAME}${g.CLOSED === "Y" ? " [закрыт]" : " [активен]"}${g.DESCRIPTION ? `\n  ${g.DESCRIPTION}` : ""}`
     ).join("\n\n");
 
-    return { content: [{ type: "text", text: `Найдено: ${list.length}\n\n${lines}` }] };
+    return { content: [{ type: "text", text: `Найдено: ${filtered.length}\n\n${lines}` }] };
   }
 );
 
@@ -529,7 +539,7 @@ app.post("/messages", express.json(), async (req, res) => {
 });
 
 app.get("/health", (_, res) =>
-  res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "3.4", tools: 16 })
+  res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "3.5", tools: 16 })
 );
 
 const PORT = process.env.PORT || 3000;
