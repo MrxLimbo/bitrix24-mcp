@@ -687,7 +687,8 @@ app.post("/bot", express.urlencoded({ extended: true }), express.json(), async (
   }
 
   const data     = body.data || body.DATA || {};
-  const botId    = data.BOT?.ID || data.BOT_ID;
+  const botRaw   = data.BOT;
+  const botId    = typeof botRaw === "object" ? botRaw?.ID : botRaw || data.BOT_ID;
   const params   = data.PARAMS || data;
   const dialogId = params.DIALOG_ID || data.DIALOG_ID;
   const userId   = params.FROM_USER_ID || params.USER_ID || data.USER_ID;
