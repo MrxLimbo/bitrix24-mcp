@@ -1,4 +1,8 @@
-ckage · JSON
+Понятно — `package.json` повреждён при загрузке на GitHub. Замени его содержимое вручную.
+
+Зайди на GitHub → `package.json` → карандаш ✏️ → удали всё → вставь **точно это**:
+
+```json
 {
   "name": "bitrix24-mcp",
   "version": "1.0.0",
@@ -16,3 +20,6 @@ ckage · JSON
     "node": ">=18"
   }
 }
+```
+
+Нажми **Commit changes**.
