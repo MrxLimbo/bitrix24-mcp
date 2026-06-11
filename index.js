@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import express from "express";
 import { z } from "zod";
+import Anthropic from "@anthropic-ai/sdk";
 
 const WEBHOOK = process.env.BITRIX_WEBHOOK_URL;
 if (!WEBHOOK) { console.error("❌ Нужна BITRIX_WEBHOOK_URL"); process.exit(1); }
@@ -579,6 +580,129 @@ server.tool("get_collab_chat",
   }
 );
 
+// ── Anthropic Client ───────────────────────────────────────────────────────
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+const BOT_SYSTEM = `Ты AI-ассистент Red Petroleum встроенный в Bitrix24. Тебя зовут Red AI.
+Ты помогаешь сотрудникам работать с задачами и проектами.
+
+Что ты умеешь:
+- Показывать задачи сотрудников и проектов
+- Создавать задачи
+- Показывать статусы проектов (RedPay, RedMarket, RedLogist, RedPro, Оптимум, КЦ, Альфа и др.)
+- Анализировать загрузку команды
+- Показывать просроченные задачи
+
+Отвечай коротко, по делу, на русском языке. Используй эмодзи для структуры.
+Если не понял запрос — попроси уточнить.`;
+
+async function buildContext(message, userId) {
+  const msg = message.toLowerCase();
+  let context = "";
+
+  try {
+    // Ищем упоминание проекта
+    for (const [key, proj] of Object.entries(PROJECTS)) {
+      if (msg.includes(key)) {
+        const result = await bx("tasks.task.list", {
+          filter: { GROUP_ID: proj.id, "!STATUS": "4" },
+          select: ["ID","TITLE","STATUS","DEADLINE","PRIORITY"],
+          order: { PRIORITY: "DESC" },
+        });
+        const tasks = result.tasks || [];
+        const now = new Date();
+        const overdue = tasks.filter(t => t.deadline && new Date(t.deadline) < now);
+        context = `Проект: ${proj.name} | Открытых: ${tasks.length} | Просрочено: ${overdue.length}\n` +
+          tasks.slice(0, 15).map(t => {
+            const pr = t.priority === "2" ? "🔴" : "";
+            const dl = t.deadline ? ` до ${new Date(t.deadline).toLocaleDateString("ru-RU")}` : "";
+            return `[${t.id}] ${pr}${t.title}${dl} — ${STATUS[t.status] || t.status}`;
+          }).join("\n");
+        break;
+      }
+    }
+
+    // Мои задачи
+    if (!context && (msg.includes("мои задач") || msg.includes("my task") || msg.includes("мои"))) {
+      const result = await bx("tasks.task.list", {
+        filter: { RESPONSIBLE_ID: parseInt(userId), "!STATUS": "4" },
+        select: ["ID","TITLE","STATUS","DEADLINE","PRIORITY"],
+        order: { ACTIVITY_DATE: "DESC" },
+      });
+      const tasks = result.tasks || [];
+      context = `Твои задачи (${tasks.length}):\n` +
+        tasks.slice(0, 15).map(t =>
+          `[${t.id}] ${t.title} — ${STATUS[t.status] || t.status}`
+        ).join("\n");
+    }
+
+    // Просроченные
+    if (!context && (msg.includes("просроч") || msg.includes("горит") || msg.includes("overdue"))) {
+      const result = await bx("tasks.task.list", {
+        filter: { "<=DEADLINE": new Date().toISOString(), "!STATUS": "4" },
+        select: ["ID","TITLE","STATUS","RESPONSIBLE_ID","DEADLINE"],
+        order: { DEADLINE: "ASC" },
+      });
+      const tasks = result.tasks || [];
+      context = `🚨 Просроченные задачи (${tasks.length}):\n` +
+        tasks.slice(0, 15).map(t => {
+          const days = Math.floor((Date.now() - new Date(t.deadline)) / 86400000);
+          return `[${t.id}] ${t.title} · просрочено ${days} дн.`;
+        }).join("\n");
+    }
+  } catch (e) {
+    console.error("Context error:", e.message);
+  }
+
+  return context;
+}
+
+// ── Bot endpoint ────────────────────────────────────────────────────────────
+app.post("/bot", express.urlencoded({ extended: true }), express.json(), async (req, res) => {
+  res.status(200).send("OK"); // Всегда 200 чтобы Bitrix24 не повторял
+
+  const body = req.body;
+  const event = body.event || body.EVENT;
+  if (event !== "ONIMBOTMESSAGEADD") return;
+
+  const data    = body.data || body.DATA || {};
+  const botId   = data.BOT_ID;
+  const dialogId = data.DIALOG_ID;
+  const userId  = data.USER_ID;
+  const message = data.MESSAGE;
+
+  if (!message || !dialogId || !botId) return;
+
+  try {
+    const context = await buildContext(message, userId);
+    const userMsg = context ? `${message}\n\nДанные из Bitrix24:\n${context}` : message;
+
+    const response = await anthropic.messages.create({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 1000,
+      system: BOT_SYSTEM,
+      messages: [{ role: "user", content: userMsg }],
+    });
+
+    const answer = response.content[0]?.text || "Не могу ответить, попробуй снова.";
+
+    await bx("imbot.message.add", {
+      BOT_ID: botId,
+      DIALOG_ID: dialogId,
+      MESSAGE: answer,
+    });
+  } catch (e) {
+    console.error("Bot error:", e.message);
+    try {
+      await bx("imbot.message.add", {
+        BOT_ID: botId,
+        DIALOG_ID: dialogId,
+        MESSAGE: "⚠️ Ошибка. Попробуй снова.",
+      });
+    } catch {}
+  }
+});
+
 // ── Express + SSE ──────────────────────────────────────────────────────────
 const app = express();
 const sessions = {};
@@ -598,7 +722,7 @@ app.post("/messages", express.json(), async (req, res) => {
 });
 
 app.get("/health", (_, res) =>
-  res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "4.1", tools: 17 })
+  res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "5.0", tools: 17, bot: true })
 );
 
 const PORT = process.env.PORT || 3000;
