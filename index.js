@@ -428,12 +428,17 @@ server.tool("get_task_comments",
   { task_id: z.number().describe("ID задачи") },
   async ({ task_id }) => {
     const result = await bx("task.commentitem.getList", { TASK_ID: task_id });
-    const comments = Array.isArray(result) ? result : [];
+    const comments = Array.isArray(result)
+      ? result
+      : result && typeof result === "object"
+        ? Object.values(result)
+        : [];
     if (!comments.length) return { content: [{ type: "text", text: "Комментариев нет" }] };
 
     const lines = comments.map(c => {
       const date = c.POST_DATE ? new Date(c.POST_DATE).toLocaleDateString("ru-RU") : "—";
-      return `[${date}] ID:${c.AUTHOR_ID}\n${c.POST_MESSAGE}`;
+      const author = c.AUTHOR_ID ? `ID:${c.AUTHOR_ID}` : "—";
+      return `[${date}] ${author}\n${c.POST_MESSAGE || "—"}`;
     }).join("\n\n─────\n\n");
 
     return { content: [{ type: "text", text: `Комментарии к задаче #${task_id} (${comments.length}):\n\n${lines}` }] };
@@ -555,7 +560,7 @@ app.post("/messages", express.json(), async (req, res) => {
 });
 
 app.get("/health", (_, res) =>
-  res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "3.9", tools: 16 })
+  res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "4.0", tools: 16 })
 );
 
 const PORT = process.env.PORT || 3000;
