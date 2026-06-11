@@ -669,11 +669,18 @@ async function buildContext(message, userId) {
 
 // ── Bot endpoint ────────────────────────────────────────────────────────────
 app.post("/bot", express.urlencoded({ extended: true }), express.json(), async (req, res) => {
-  res.status(200).send("OK"); // Всегда 200 чтобы Bitrix24 не повторял
+  res.status(200).send("OK");
 
   const body = req.body;
+  console.log("🤖 Bot request:", JSON.stringify(body).slice(0, 500));
+
   const event = body.event || body.EVENT;
-  if (event !== "ONIMBOTMESSAGEADD") return;
+  console.log("📨 Event:", event);
+
+  if (event !== "ONIMBOTMESSAGEADD") {
+    console.log("⏭️ Skipping event:", event);
+    return;
+  }
 
   const data    = body.data || body.DATA || {};
   const botId   = data.BOT_ID;
@@ -681,12 +688,15 @@ app.post("/bot", express.urlencoded({ extended: true }), express.json(), async (
   const userId  = data.USER_ID;
   const message = data.MESSAGE;
 
+  console.log(`💬 Message from ${userId}: "${message}" | botId:${botId} dialogId:${dialogId}`);
+
   if (!message || !dialogId || !botId) return;
 
   try {
     const context = await buildContext(message, userId);
     const userMsg = context ? `${message}\n\nДанные из Bitrix24:\n${context}` : message;
 
+    console.log("🧠 Calling Claude API...");
     const response = await anthropic.messages.create({
       model: "claude-haiku-4-5-20251001",
       max_tokens: 1000,
@@ -695,12 +705,14 @@ app.post("/bot", express.urlencoded({ extended: true }), express.json(), async (
     });
 
     const answer = response.content[0]?.text || "Не могу ответить, попробуй снова.";
+    console.log("✅ Claude answer:", answer.slice(0, 100));
 
     await bx("imbot.message.add", {
       BOT_ID: botId,
       DIALOG_ID: dialogId,
       MESSAGE: answer,
     });
+    console.log("📤 Message sent to Bitrix24");
   } catch (e) {
     console.error("Bot error:", e.message);
     try {
