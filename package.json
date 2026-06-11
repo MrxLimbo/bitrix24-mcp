@@ -1,3 +1,4 @@
+ckage · JSON
 {
   "name": "bitrix24-mcp",
   "version": "1.0.0",
@@ -6,7 +7,7 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.52.0",
+    "@anthropic-ai/sdk": "latest",
     "@modelcontextprotocol/sdk": "^1.12.0",
     "express": "^4.19.2",
     "zod": "^3.23.8"
