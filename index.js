@@ -62,9 +62,13 @@ function taskLink(taskId, groupId) {
 }
 
 const STATUS = {
-  "1": "🆕 Новая", "2": "🔄 В работе", "3": "⏳ Ждёт контроля",
-  "4": "🔵 Завершена (ожидает подтверждения)", "5": "✅ Завершена",
-  "6": "⏸️ Отложена", "7": "❌ Отклонена",
+  "1": "🆕 Новая",
+  "2": "📋 Ждёт выполнения",   // назначена, кнопка «Начать» не нажата
+  "3": "🔄 Выполняется",       // исполнитель нажал «Начать»
+  "4": "👀 Ждёт контроля",     // исполнитель нажал «Завершить», ждёт одобрения постановщика
+  "5": "✅ Завершена",          // постановщик одобрил, задача закрыта
+  "6": "⏸️ Отложена",           // приостановлена, «Возобновить» → статус 3
+  "7": "❌ Отклонена",
 };
 
 const PRIORITY = { "0": "низкий", "1": "средний", "2": "🔴 высокий" };
@@ -113,11 +117,13 @@ const TOOL_HANDLERS = {
     if (!tasks.length) return "Задач нет";
 
     const now = new Date();
-    const overdue    = tasks.filter(t => t.deadline && new Date(t.deadline) < now && t.status !== "4");
-    const highPrio   = tasks.filter(t => t.priority === "2" && t.status !== "4");
-    const inProgress = tasks.filter(t => t.status === "2");
+    const overdue    = tasks.filter(t => t.deadline && new Date(t.deadline) < now && !["5","7"].includes(t.status));
+    const highPrio   = tasks.filter(t => t.priority === "2" && !["5","7"].includes(t.status));
+    const inProgress = tasks.filter(t => t.status === "3"); // Выполняется
+    const waiting    = tasks.filter(t => t.status === "2"); // Ждёт выполнения
+    const pending    = tasks.filter(t => t.status === "4"); // Ждёт контроля
     const newTasks   = tasks.filter(t => t.status === "1");
-    const done       = tasks.filter(t => t.status === "4");
+    const done       = tasks.filter(t => t.status === "5");
 
     const fmt = (t) => {
       const dl = t.deadline ? ` · до ${new Date(t.deadline).toLocaleDateString("ru-RU")}` : "";
@@ -128,7 +134,9 @@ const TOOL_HANDLERS = {
     let text = `📊 ДАШБОРД — всего задач: ${tasks.length}\n${"═".repeat(44)}\n\n`;
     if (overdue.length)  text += `🚨 ПРОСРОЧЕНО (${overdue.length}):\n${overdue.map(fmt).join("\n")}\n\n`;
     if (highPrio.length) text += `🔴 ВЫСОКИЙ ПРИОРИТЕТ (${highPrio.length}):\n${highPrio.map(fmt).join("\n")}\n\n`;
-    text += `🔄 В РАБОТЕ (${inProgress.length}):\n${inProgress.length ? inProgress.map(fmt).join("\n") : "  —"}\n\n`;
+    text += `🔄 ВЫПОЛНЯЕТСЯ (${inProgress.length}):\n${inProgress.length ? inProgress.map(fmt).join("\n") : "  —"}\n\n`;
+    text += `📋 ЖДЁТ ВЫПОЛНЕНИЯ (${waiting.length}):\n${waiting.length ? waiting.map(fmt).join("\n") : "  —"}\n\n`;
+    text += `👀 ЖДЁТ КОНТРОЛЯ (${pending.length}):\n${pending.length ? pending.map(fmt).join("\n") : "  —"}\n\n`;
     text += `🆕 НОВЫЕ (${newTasks.length}):\n${newTasks.length ? newTasks.map(fmt).join("\n") : "  —"}\n\n`;
     text += `✅ ЗАВЕРШЕНЫ (${done.length})\n`;
     return text;
@@ -137,8 +145,8 @@ const TOOL_HANDLERS = {
   employee_tasks: async (input, userId) => {
     const { responsible_id, status } = input;
     const filter = { RESPONSIBLE_ID: responsible_id };
-    if (status === "active") filter["!STATUS"] = "4";
-    if (status === "done")   filter.STATUS = "4";
+    if (status === "active") filter["!STATUS"] = ["5","7"]; // исключаем только Завершена и Отклонена
+    if (status === "done")   filter.STATUS = "5";           // только реально завершённые
 
     const result = await bx("tasks.task.list", {
       filter,
@@ -163,7 +171,7 @@ const TOOL_HANDLERS = {
       text += `${status} (${list.length})\n`;
       list.forEach(t => {
         const dl = t.deadline ? ` · до ${new Date(t.deadline).toLocaleDateString("ru-RU")}` : "";
-        const overdue = t.deadline && new Date(t.deadline) < now && t.status !== "4" ? " ⚠️" : "";
+        const overdue = t.deadline && new Date(t.deadline) < now && t.status !== "5" ? " ⚠️" : "";
         text += `  [${t.id}] ${t.title}${dl}${overdue} | ${taskLink(t.id, t.groupId)}\n`;
       });
       text += "\n";
@@ -173,7 +181,7 @@ const TOOL_HANDLERS = {
 
   list_tasks: async (input, userId) => {
     const { status, priority, group_id } = input;
-    const statusMap = { new:1, in_progress:2, waiting:3, completed:4, deferred:5 };
+    const statusMap = { new:1, pending:2, in_progress:3, waiting:4, completed:5, deferred:6 };
     const filter = {};
     if (status && status !== "all") filter.STATUS = statusMap[status];
     if (priority) filter.PRIORITY = priority;
@@ -278,14 +286,14 @@ const TOOL_HANDLERS = {
     const { group_id, days_back = 7 } = input;
     const [openResult, closedResult] = await Promise.all([
       bx("tasks.task.list", {
-        filter: { GROUP_ID: group_id, "!STATUS": ["4","5"] },
+        filter: { GROUP_ID: group_id, "!STATUS": ["5","7"] },  // всё кроме Завершена и Отклонена
         select: ["ID","TITLE","STATUS","PRIORITY","RESPONSIBLE_ID","DEADLINE"],
         order: { PRIORITY: "DESC", DEADLINE: "ASC" },
       }, userId),
       bx("tasks.task.list", {
         filter: {
           GROUP_ID: group_id,
-          STATUS: "4",
+          STATUS: "5",  // только реально завершённые
           ">=CLOSED_DATE": new Date(Date.now() - days_back * 86400000).toISOString().split("T")[0],
         },
         select: ["ID","TITLE","RESPONSIBLE_ID","CLOSED_DATE"],
@@ -366,7 +374,7 @@ const TOOL_HANDLERS = {
 
   overdue_report: async (input, userId) => {
     const { group_id } = input;
-    const filter = { "<=DEADLINE": new Date().toISOString(), "!STATUS": ["4","5"] };
+    const filter = { "<=DEADLINE": new Date().toISOString(), "!STATUS": ["5","7"] };
     if (group_id) filter.GROUP_ID = group_id;
 
     const result = await bx("tasks.task.list", {
@@ -399,7 +407,7 @@ const TOOL_HANDLERS = {
 
   workload_report: async (input, userId) => {
     const { group_id } = input;
-    const filter = { "!STATUS": ["4","5"] };
+    const filter = { "!STATUS": ["5","7"] };
     if (group_id) filter.GROUP_ID = group_id;
 
     const result = await bx("tasks.task.list", {
@@ -481,7 +489,7 @@ const TOOL_HANDLERS = {
         taskId: task_id,
         fields: { TITLE: title, STATUS: "2" },
       }, userId);
-      return `✅ Задача #${task_id} восстановлена из архива (статус "В работе").\n${taskLink(task_id, current.task?.groupId)}`;
+      return `✅ Задача #${task_id} восстановлена из архива (статус "Ждёт выполнения").\n${taskLink(task_id, current.task?.groupId)}`;
     }
 
     return `Укажи action: "archive" (заархивировать) или "unarchive" (восстановить)`;
@@ -537,7 +545,7 @@ const ANTHROPIC_TOOLS = [
     input_schema: {
       type: "object",
       properties: {
-        status:   { type: "string", enum: ["all","new","in_progress","waiting","completed","deferred"] },
+        status:   { type: "string", enum: ["all","new","pending","in_progress","waiting","completed","deferred"] },
         priority: { type: "string", enum: ["0","1","2"] },
         group_id: { type: "number", description: "ID проекта" },
       },
@@ -559,7 +567,7 @@ const ANTHROPIC_TOOLS = [
       type: "object",
       properties: {
         task_id:        { type: "number" },
-        status:         { type: "string", enum: ["1","2","3","4","5","6","7"], description: "1-новая 2-в работе 3-ждёт контроля 4-завершена(не подтв) 5-завершена 6-отложена 7-отклонена" },
+        status:         { type: "string", enum: ["1","2","3","4","5","6","7"], description: "1-новая 2-ждёт выполнения 3-выполняется 4-ждёт контроля 5-завершена 6-отложена 7-отклонена" },
         priority:       { type: "string", enum: ["0","1","2"] },
         deadline:       { type: "string", description: "YYYY-MM-DD" },
         responsible_id: { type: "number" },
@@ -748,11 +756,13 @@ server.tool("manager_dashboard",
     if (!tasks.length) return { content: [{ type: "text", text: "Задач нет" }] };
 
     const now = new Date();
-    const overdue   = tasks.filter(t => t.deadline && new Date(t.deadline) < now && t.status !== "4");
-    const highPrio  = tasks.filter(t => t.priority === "2" && t.status !== "4");
-    const inProgress = tasks.filter(t => t.status === "2");
+    const overdue   = tasks.filter(t => t.deadline && new Date(t.deadline) < now && !["5","7"].includes(t.status));
+    const highPrio  = tasks.filter(t => t.priority === "2" && !["5","7"].includes(t.status));
+    const inProgress = tasks.filter(t => t.status === "3"); // Выполняется
+    const waiting   = tasks.filter(t => t.status === "2"); // Ждёт выполнения
+    const pendingCtrl = tasks.filter(t => t.status === "4"); // Ждёт контроля
     const newTasks  = tasks.filter(t => t.status === "1");
-    const done      = tasks.filter(t => t.status === "4");
+    const done      = tasks.filter(t => t.status === "5");
 
     const fmt = (t) => {
       const dl = t.deadline ? ` · до ${new Date(t.deadline).toLocaleDateString("ru-RU")}` : "";
@@ -768,7 +778,9 @@ server.tool("manager_dashboard",
     if (highPrio.length) {
       text += `🔴 ВЫСОКИЙ ПРИОРИТЕТ (${highPrio.length}):\n${highPrio.map(fmt).join("\n")}\n\n`;
     }
-    text += `🔄 В РАБОТЕ (${inProgress.length}):\n${inProgress.length ? inProgress.map(fmt).join("\n") : "  —"}\n\n`;
+    text += `🔄 ВЫПОЛНЯЕТСЯ (${inProgress.length}):\n${inProgress.length ? inProgress.map(fmt).join("\n") : "  —"}\n\n`;
+    text += `📋 ЖДЁТ ВЫПОЛНЕНИЯ (${waiting.length}):\n${waiting.length ? waiting.map(fmt).join("\n") : "  —"}\n\n`;
+    text += `👀 ЖДЁТ КОНТРОЛЯ (${pendingCtrl.length}):\n${pendingCtrl.length ? pendingCtrl.map(fmt).join("\n") : "  —"}\n\n`;
     text += `🆕 НОВЫЕ (${newTasks.length}):\n${newTasks.length ? newTasks.map(fmt).join("\n") : "  —"}\n\n`;
     text += `✅ ЗАВЕРШЕНЫ (${done.length})\n`;
 
@@ -785,8 +797,8 @@ server.tool("employee_tasks",
   },
   async ({ responsible_id, status }) => {
     const filter = { RESPONSIBLE_ID: responsible_id };
-    if (status === "active") filter["!STATUS"] = "4";
-    if (status === "done")   filter.STATUS = "4";
+    if (status === "active") filter["!STATUS"] = ["5","7"]; // исключаем только Завершена и Отклонена
+    if (status === "done")   filter.STATUS = "5";           // только реально завершённые
 
     const result = await bx("tasks.task.list", {
       filter,
@@ -811,7 +823,7 @@ server.tool("employee_tasks",
       text += `${status} (${list.length})\n`;
       list.forEach(t => {
         const dl = t.deadline ? ` · до ${new Date(t.deadline).toLocaleDateString("ru-RU")}` : "";
-        const overdue = t.deadline && new Date(t.deadline) < now && t.status !== "4" ? " ⚠️" : "";
+        const overdue = t.deadline && new Date(t.deadline) < now && t.status !== "5" ? " ⚠️" : "";
         text += `  [${t.id}] ${t.title}${dl}${overdue}\n`;
       });
       text += "\n";
@@ -825,12 +837,12 @@ server.tool("employee_tasks",
 server.tool("list_tasks",
   "Получить список задач с фильтрами по статусу, приоритету или проекту.",
   {
-    status:   z.enum(["all","new","in_progress","waiting","completed","deferred"]).optional(),
+    status:   z.enum(["all","new","pending","in_progress","waiting","completed","deferred"]).optional(),
     priority: z.enum(["0","1","2"]).optional().describe("0-низкий 1-средний 2-высокий"),
     group_id: z.number().optional().describe("ID проекта"),
   },
   async ({ status, priority, group_id }) => {
-    const statusMap = { new:1, in_progress:2, waiting:3, completed:4, deferred:5 };
+    const statusMap = { new:1, pending:2, in_progress:3, waiting:4, completed:5, deferred:6 };
     const filter = {};
     if (status && status !== "all") filter.STATUS = statusMap[status];
     if (priority) filter.PRIORITY = priority;
@@ -881,7 +893,7 @@ server.tool("update_task",
   "Изменить статус, приоритет, дедлайн или ответственного у существующей задачи.",
   {
     task_id:        z.number().describe("ID задачи"),
-    status:         z.enum(["1","2","3","4","5"]).optional().describe("1-новая 2-в работе 3-ожидание 4-завершена 5-отложена"),
+    status:         z.enum(["1","2","3","4","5","6","7"]).optional().describe("1-новая 2-ждёт выполнения 3-выполняется 4-ждёт контроля 5-завершена 6-отложена 7-отклонена"),
     priority:       z.enum(["0","1","2"]).optional().describe("0-низкий 1-средний 2-высокий"),
     deadline:       z.string().optional().describe("Новый дедлайн YYYY-MM-DD"),
     responsible_id: z.number().optional().describe("Новый ответственный"),
@@ -983,14 +995,14 @@ server.tool("get_project_summary",
   async ({ group_id, days_back = 7 }) => {
     const [openResult, closedResult] = await Promise.all([
       bx("tasks.task.list", {
-        filter: { GROUP_ID: group_id, "!STATUS": ["4","5"] },
+        filter: { GROUP_ID: group_id, "!STATUS": ["5","7"] },  // всё кроме Завершена и Отклонена
         select: ["ID","TITLE","STATUS","PRIORITY","RESPONSIBLE_ID","DEADLINE"],
         order: { PRIORITY: "DESC", DEADLINE: "ASC" },
       }),
       bx("tasks.task.list", {
         filter: {
           GROUP_ID: group_id,
-          STATUS: "4",
+          STATUS: "5",  // только реально завершённые
           ">=CLOSED_DATE": new Date(Date.now() - days_back * 86400000).toISOString().split("T")[0],
         },
         select: ["ID","TITLE","RESPONSIBLE_ID","CLOSED_DATE"],
@@ -1098,7 +1110,7 @@ server.tool("overdue_report",
   "Показать все просроченные задачи по всем сотрудникам — кто что не сделал вовремя.",
   { group_id: z.number().optional().describe("ID проекта для фильтра") },
   async ({ group_id }) => {
-    const filter = { "<=DEADLINE": new Date().toISOString(), "!STATUS": ["4","5"] };
+    const filter = { "<=DEADLINE": new Date().toISOString(), "!STATUS": ["5","7"] };
     if (group_id) filter.GROUP_ID = group_id;
 
     const result = await bx("tasks.task.list", {
@@ -1136,7 +1148,7 @@ server.tool("workload_report",
   "Показать загрузку каждого сотрудника — сколько задач у кого, кто перегружен.",
   { group_id: z.number().optional().describe("ID проекта для фильтра") },
   async ({ group_id }) => {
-    const filter = { "!STATUS": ["4","5"] };
+    const filter = { "!STATUS": ["5","7"] };
     if (group_id) filter.GROUP_ID = group_id;
 
     const result = await bx("tasks.task.list", {
@@ -1276,8 +1288,15 @@ ${Object.entries(PROJECTS).map(([key, p]) => `- ${key} → ${p.id} (${p.name})`)
 
 Для изменения статуса/приоритета/дедлайна/исполнителя/проекта/названия используй update_task —
 он поддерживает все эти поля сразу, включая group_id (перенос между проектами).
-СТАТУСЫ: 1-новая, 2-в работе, 3-ждёт контроля, 4-завершена(не подтв), 5-завершена, 6-отложена, 7-отклонена.
-Реально завершённые задачи имеют статус 5, НЕ 4.
+СТАТУСЫ задач Bitrix24 (коды из API — подтверждены интерфейсом):
+2 = 📋 Ждёт выполнения  — назначена исполнителю, кнопка «Начать» ещё не нажата
+3 = 🔄 Выполняется      — исполнитель нажал «Начать», работа активно идёт
+4 = 👀 Ждёт контроля   — исполнитель нажал «Завершить», ждёт одобрения постановщика
+5 = ✅ Завершена         — постановщик одобрил, задача полностью закрыта
+6 = ⏸️ Отложена          — приостановлена кнопкой «Отложить»; «Возобновить» → статус 3
+7 = ❌ Отклонена
+Активные задачи (требуют действий) = статусы 2, 3, 4.
+Реально завершённые = статус 5. «Возобновить» из Завершена (5) → возвращает к статусу 2 (как новая).
 
 УДАЛЕНИЕ ЗАДАЧ: Bitrix24 удаляет задачи без возможности восстановления.
 Поэтому для "удаления" используй restore_task (поставит статус "отложена" и пометку [АРХИВ] в названии) —
