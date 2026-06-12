@@ -143,22 +143,34 @@ const TOOL_HANDLERS = {
   },
 
   employee_tasks: async (input, userId) => {
-    const { responsible_id, status } = input;
+    const { responsible_id, status, group_id, date_from, date_to } = input;
     const filter = { RESPONSIBLE_ID: responsible_id };
-    if (status === "active") filter["!STATUS"] = ["5","7"]; // исключаем только Завершена и Отклонена
-    if (status === "done")   filter.STATUS = "5";           // только реально завершённые
+    if (status === "active") filter["!STATUS"] = ["5","7"];
+    if (status === "done") {
+      filter.STATUS = "5";
+      if (date_from) filter[">=CLOSED_DATE"] = date_from;
+      if (date_to)   filter["<=CLOSED_DATE"] = date_to;
+    }
+    if (group_id) filter.GROUP_ID = group_id;
+
+    const select = ["ID","TITLE","STATUS","PRIORITY","DEADLINE","GROUP_ID"];
+    if (status === "done") select.push("CLOSED_DATE");
 
     const result = await bx("tasks.task.list", {
       filter,
-      select: ["ID","TITLE","STATUS","PRIORITY","DEADLINE","GROUP_ID"],
-      order: { ACTIVITY_DATE: "DESC" },
+      select,
+      order: status === "done" ? { CLOSED_DATE: "DESC" } : { ACTIVITY_DATE: "DESC" },
     }, userId);
 
     const tasks = result.tasks || [];
     if (!tasks.length) return "Задач нет";
 
     const now = new Date();
-    let text = `👤 Задачи сотрудника ID:${responsible_id} — всего: ${tasks.length}\n\n`;
+    const projectInfo = group_id ? ` | проект ID:${group_id}` : "";
+    const dateInfo = (date_from || date_to)
+      ? ` | с ${date_from || "начала"} по ${date_to || "сегодня"}`
+      : "";
+    let text = `👤 Задачи ID:${responsible_id}${projectInfo}${dateInfo} — всего: ${tasks.length}\n\n`;
 
     const groups = {};
     tasks.forEach(t => {
@@ -171,8 +183,9 @@ const TOOL_HANDLERS = {
       text += `${status} (${list.length})\n`;
       list.forEach(t => {
         const dl = t.deadline ? ` · до ${new Date(t.deadline).toLocaleDateString("ru-RU")}` : "";
+        const closed = t.closedDate ? ` · закрыта ${new Date(t.closedDate).toLocaleDateString("ru-RU")}` : "";
         const overdue = t.deadline && new Date(t.deadline) < now && t.status !== "5" ? " ⚠️" : "";
-        text += `  [${t.id}] ${t.title}${dl}${overdue} | ${taskLink(t.id, t.groupId)}\n`;
+        text += `  [${t.id}] ${t.title}${dl}${closed}${overdue} | ${taskLink(t.id, t.groupId)}\n`;
       });
       text += "\n";
     }
@@ -534,7 +547,10 @@ const ANTHROPIC_TOOLS = [
       type: "object",
       properties: {
         responsible_id: { type: "number", description: "ID сотрудника" },
-        status: { type: "string", enum: ["all","active","done"] },
+        status:         { type: "string", enum: ["all","active","done"] },
+        group_id:       { type: "number", description: "Фильтр по проекту (group_id)" },
+        date_from:      { type: "string", description: "Дата от YYYY-MM-DD — для фильтра завершённых по дате закрытия" },
+        date_to:        { type: "string", description: "Дата до YYYY-MM-DD — для фильтра завершённых по дате закрытия" },
       },
       required: ["responsible_id"],
     },
@@ -793,24 +809,39 @@ server.tool("employee_tasks",
   "Показать все задачи конкретного сотрудника — что в работе, что просрочено, загрузка.",
   {
     responsible_id: z.number().describe("ID сотрудника в Bitrix24"),
-    status: z.enum(["all","active","done"]).optional().describe("all/active/done"),
+    status:    z.enum(["all","active","done"]).optional().describe("all/active/done"),
+    group_id:  z.number().optional().describe("Фильтр по проекту (group_id)"),
+    date_from: z.string().optional().describe("Дата от YYYY-MM-DD — для завершённых по дате закрытия"),
+    date_to:   z.string().optional().describe("Дата до YYYY-MM-DD — для завершённых по дате закрытия"),
   },
-  async ({ responsible_id, status }) => {
+  async ({ responsible_id, status, group_id, date_from, date_to }) => {
     const filter = { RESPONSIBLE_ID: responsible_id };
-    if (status === "active") filter["!STATUS"] = ["5","7"]; // исключаем только Завершена и Отклонена
-    if (status === "done")   filter.STATUS = "5";           // только реально завершённые
+    if (status === "active") filter["!STATUS"] = ["5","7"];
+    if (status === "done") {
+      filter.STATUS = "5";
+      if (date_from) filter[">=CLOSED_DATE"] = date_from;
+      if (date_to)   filter["<=CLOSED_DATE"] = date_to;
+    }
+    if (group_id) filter.GROUP_ID = group_id;
+
+    const select = ["ID","TITLE","STATUS","PRIORITY","DEADLINE","GROUP_ID"];
+    if (status === "done") select.push("CLOSED_DATE");
 
     const result = await bx("tasks.task.list", {
       filter,
-      select: ["ID","TITLE","STATUS","PRIORITY","DEADLINE","GROUP_ID"],
-      order: { ACTIVITY_DATE: "DESC" },
+      select,
+      order: status === "done" ? { CLOSED_DATE: "DESC" } : { ACTIVITY_DATE: "DESC" },
     });
 
     const tasks = result.tasks || [];
     if (!tasks.length) return { content: [{ type: "text", text: "Задач нет" }] };
 
     const now = new Date();
-    let text = `👤 Задачи сотрудника ID:${responsible_id} — всего: ${tasks.length}\n\n`;
+    const projectInfo = group_id ? ` | проект ID:${group_id}` : "";
+    const dateInfo = (date_from || date_to)
+      ? ` | с ${date_from || "начала"} по ${date_to || "сегодня"}`
+      : "";
+    let text = `👤 Задачи ID:${responsible_id}${projectInfo}${dateInfo} — всего: ${tasks.length}\n\n`;
 
     const groups = {};
     tasks.forEach(t => {
@@ -823,8 +854,9 @@ server.tool("employee_tasks",
       text += `${status} (${list.length})\n`;
       list.forEach(t => {
         const dl = t.deadline ? ` · до ${new Date(t.deadline).toLocaleDateString("ru-RU")}` : "";
+        const closed = t.closedDate ? ` · закрыта ${new Date(t.closedDate).toLocaleDateString("ru-RU")}` : "";
         const overdue = t.deadline && new Date(t.deadline) < now && t.status !== "5" ? " ⚠️" : "";
-        text += `  [${t.id}] ${t.title}${dl}${overdue}\n`;
+        text += `  [${t.id}] ${t.title}${dl}${closed}${overdue}\n`;
       });
       text += "\n";
     }
@@ -1282,21 +1314,24 @@ ${Object.entries(PROJECTS).map(([key, p]) => `- ${key} → ${p.id} (${p.name})`)
 в вызовах инструментов (list_tasks, get_project_summary, overdue_report, workload_report и т.д.).
 
 Если пользователь просит "мои задачи" — используй его ID (указан выше) как responsible_id в employee_tasks.
+Для завершённых задач с фильтром по дате используй date_from и date_to (YYYY-MM-DD).
+Для завершённых в конкретном проекте используй group_id вместе со status="done".
+НЕ ПРИДУМЫВАЙ статистику по датам — если данных нет, скажи честно и используй правильные параметры.
 
 Для создания задач используй create_task. Если не хватает данных (например неясен исполнитель) —
 сначала вызови find_user чтобы найти ID, или уточни у пользователя.
 
 Для изменения статуса/приоритета/дедлайна/исполнителя/проекта/названия используй update_task —
 он поддерживает все эти поля сразу, включая group_id (перенос между проектами).
-СТАТУСЫ задач Bitrix24 (коды из API — подтверждены интерфейсом):
-2 = 📋 Ждёт выполнения  — назначена исполнителю, кнопка «Начать» ещё не нажата
-3 = 🔄 Выполняется      — исполнитель нажал «Начать», работа активно идёт
-4 = 👀 Ждёт контроля   — исполнитель нажал «Завершить», ждёт одобрения постановщика
-5 = ✅ Завершена         — постановщик одобрил, задача полностью закрыта
-6 = ⏸️ Отложена          — приостановлена кнопкой «Отложить»; «Возобновить» → статус 3
+СТАТУСЫ задач Bitrix24 (коды из API — подтверждены живыми тестами):
+2 = 📋 Ждёт выполнения  — назначена, кнопка «Начать» не нажата
+3 = 🔄 Выполняется      — исполнитель нажал «Начать», работа идёт
+4 = 👀 Ждёт контроля   — В ДАННОМ ПОРТАЛЕ НЕ ИСПОЛЬЗУЕТСЯ. «Завершить» всегда даёт статус 5 напрямую.
+5 = ✅ Завершена         — закрыта (кнопка «Возобновить»)
+6 = ⏸️ Отложена          — «Отложить»/«Приостановить» → статус 6; «Возобновить» → статус 3
 7 = ❌ Отклонена
-Активные задачи (требуют действий) = статусы 2, 3, 4.
-Реально завершённые = статус 5. «Возобновить» из Завершена (5) → возвращает к статусу 2 (как новая).
+Активные задачи = статусы 2, 3, 6. Завершённые = статус 5.
+«Возобновить» из ЛЮБОГО статуса (5 или 6) → всегда возвращает к статусу 3 «Выполняется».
 
 УДАЛЕНИЕ ЗАДАЧ: Bitrix24 удаляет задачи без возможности восстановления.
 Поэтому для "удаления" используй restore_task (поставит статус "отложена" и пометку [АРХИВ] в названии) —
