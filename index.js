@@ -7,8 +7,14 @@ import Anthropic from "@anthropic-ai/sdk";
 const WEBHOOK = process.env.BITRIX_WEBHOOK_URL;
 if (!WEBHOOK) { console.error("❌ Нужна BITRIX_WEBHOOK_URL"); process.exit(1); }
 
-async function bx(method, params = {}) {
-  const base = WEBHOOK.endsWith("/") ? WEBHOOK : WEBHOOK + "/";
+// Личные вебхуки сотрудников — задачи будут создаваться от их имени
+const USER_WEBHOOKS = {
+  "3046": "https://crm.redpetroleum.kg/rest/3046/em7h2nchgw8zgnr4/", // Эрмек Русланов
+};
+
+async function bx(method, params = {}, userId = null) {
+  const webhook = (userId && USER_WEBHOOKS[String(userId)]) || WEBHOOK;
+  const base = webhook.endsWith("/") ? webhook : webhook + "/";
   const res = await fetch(`${base}${method}.json`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -75,6 +81,7 @@ function parseCreateTaskAction(text) {
     responsibleId: get("RESPONSIBLE_ID"),
     deadline: get("DEADLINE"),
     groupId: get("GROUP_ID"),
+    checklist: get("CHECKLIST").split("|").map(s => s.trim()).filter(Boolean),
     cleanText: text.slice(0, match.index).trim(),
   };
 }
@@ -669,6 +676,7 @@ DESCRIPTION: <описание, если есть, иначе пусто>
 RESPONSIBLE_ID: <ID ответственного, если известен, иначе пусто>
 DEADLINE: <YYYY-MM-DD, если есть, иначе пусто>
 GROUP_ID: <ID проекта из словаря, если упомянут проект, иначе пусто>
+CHECKLIST: <пункты чек-листа через " | " (вертикальная черта с пробелами), если есть, иначе пусто>
 
 Этот блок НЕ показывается пользователю — он обрабатывается автоматически.
 Перед блоком напиши обычным текстом что собираешься создать.
@@ -864,7 +872,7 @@ app.post("/bot", express.urlencoded({ extended: true }), express.json(), async (
         if (action.responsibleId) fields.RESPONSIBLE_ID = parseInt(action.responsibleId);
         if (action.deadline)      fields.DEADLINE = action.deadline + "T23:59:00+06:00";
 
-        const result = await bx("tasks.task.add", { fields });
+        const result = await bx("tasks.task.add", { fields }, userId);
         const taskId = result.task?.id;
         const link = taskLink(taskId, fields.GROUP_ID);
 
@@ -914,7 +922,7 @@ app.post("/messages", express.json(), async (req, res) => {
 });
 
 app.get("/health", (_, res) =>
-  res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "5.8", tools: 18, bot: true, memory: true, profiles: true, links: true, create_task: true })
+  res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "5.9", tools: 18, bot: true, memory: true, profiles: true, links: true, create_task: true, personal_webhooks: true })
 );
 
 const PORT = process.env.PORT || 3000;
