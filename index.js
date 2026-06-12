@@ -62,8 +62,9 @@ function taskLink(taskId, groupId) {
 }
 
 const STATUS = {
-  "1": "🆕 Новая", "2": "🔄 В работе", "3": "⏳ В ожидании",
-  "4": "✅ Завершена", "5": "⏸️ Отложена", "6": "❌ Просрочена",
+  "1": "🆕 Новая", "2": "🔄 В работе", "3": "⏳ Ждёт контроля",
+  "4": "🔵 Завершена (ожидает подтверждения)", "5": "✅ Завершена",
+  "6": "⏸️ Отложена", "7": "❌ Отклонена",
 };
 
 const PRIORITY = { "0": "низкий", "1": "средний", "2": "🔴 высокий" };
@@ -215,15 +216,18 @@ const TOOL_HANDLERS = {
   },
 
   update_task: async (input, userId) => {
-    const { task_id, status, priority, deadline, responsible_id } = input;
+    const { task_id, status, priority, deadline, responsible_id, group_id, title } = input;
     const fields = {};
     if (status)         fields.STATUS         = status;
     if (priority)       fields.PRIORITY       = priority;
     if (deadline)       fields.DEADLINE       = deadline + "T23:59:00+06:00";
     if (responsible_id) fields.RESPONSIBLE_ID = responsible_id;
+    if (group_id)        fields.GROUP_ID      = group_id;
+    if (title)           fields.TITLE         = title;
 
     await bx("tasks.task.update", { taskId: task_id, fields }, userId);
-    return `✅ Задача #${task_id} обновлена`;
+    const link = taskLink(task_id, group_id);
+    return `✅ Задача #${task_id} обновлена${group_id ? `\n${link}` : ""}`;
   },
 
   send_message: async (input, userId) => {
@@ -274,7 +278,7 @@ const TOOL_HANDLERS = {
     const { group_id, days_back = 7 } = input;
     const [openResult, closedResult] = await Promise.all([
       bx("tasks.task.list", {
-        filter: { GROUP_ID: group_id, "!STATUS": "4" },
+        filter: { GROUP_ID: group_id, "!STATUS": ["4","5"] },
         select: ["ID","TITLE","STATUS","PRIORITY","RESPONSIBLE_ID","DEADLINE"],
         order: { PRIORITY: "DESC", DEADLINE: "ASC" },
       }, userId),
@@ -362,7 +366,7 @@ const TOOL_HANDLERS = {
 
   overdue_report: async (input, userId) => {
     const { group_id } = input;
-    const filter = { "<=DEADLINE": new Date().toISOString(), "!STATUS": "4" };
+    const filter = { "<=DEADLINE": new Date().toISOString(), "!STATUS": ["4","5"] };
     if (group_id) filter.GROUP_ID = group_id;
 
     const result = await bx("tasks.task.list", {
@@ -395,7 +399,7 @@ const TOOL_HANDLERS = {
 
   workload_report: async (input, userId) => {
     const { group_id } = input;
-    const filter = { "!STATUS": "4" };
+    const filter = { "!STATUS": ["4","5"] };
     if (group_id) filter.GROUP_ID = group_id;
 
     const result = await bx("tasks.task.list", {
@@ -451,7 +455,36 @@ const TOOL_HANDLERS = {
   delete_task: async (input, userId) => {
     const { task_id } = input;
     await bx("tasks.task.delete", { taskId: task_id }, userId);
-    return `✅ Задача #${task_id} удалена`;
+    return `✅ Задача #${task_id} удалена навсегда (без возможности восстановления)`;
+  },
+
+  restore_task: async (input, userId) => {
+    const { task_id, action } = input;
+
+    if (action === "archive") {
+      // "Удаляем" мягко: статус → отложена, помечаем в названии
+      const current = await bx("tasks.task.get", { taskId: task_id }, userId);
+      const title = current.task?.title || "";
+      if (!title.startsWith("[АРХИВ] ")) {
+        await bx("tasks.task.update", {
+          taskId: task_id,
+          fields: { TITLE: `[АРХИВ] ${title}`, STATUS: "6" },
+        }, userId);
+      }
+      return `📦 Задача #${task_id} помещена в архив (статус "Отложена", помечена [АРХИВ]). Можно восстановить командой "восстанови задачу ${task_id}".`;
+    }
+
+    if (action === "unarchive") {
+      const current = await bx("tasks.task.get", { taskId: task_id }, userId);
+      const title = (current.task?.title || "").replace(/^\[АРХИВ\]\s*/, "");
+      await bx("tasks.task.update", {
+        taskId: task_id,
+        fields: { TITLE: title, STATUS: "2" },
+      }, userId);
+      return `✅ Задача #${task_id} восстановлена из архива (статус "В работе").\n${taskLink(task_id, current.task?.groupId)}`;
+    }
+
+    return `Укажи action: "archive" (заархивировать) или "unarchive" (восстановить)`;
   },
 
 };
@@ -521,15 +554,17 @@ const ANTHROPIC_TOOLS = [
   },
   {
     name: "update_task",
-    description: "Изменить статус, приоритет, дедлайн или ответственного у существующей задачи.",
+    description: "Изменить статус, приоритет, дедлайн, ответственного, проект (group_id) или название у существующей задачи.",
     input_schema: {
       type: "object",
       properties: {
         task_id:        { type: "number" },
-        status:         { type: "string", enum: ["1","2","3","4","5"], description: "1-новая 2-в работе 3-ожидание 4-завершена 5-отложена" },
+        status:         { type: "string", enum: ["1","2","3","4","5","6","7"], description: "1-новая 2-в работе 3-ждёт контроля 4-завершена(не подтв) 5-завершена 6-отложена 7-отклонена" },
         priority:       { type: "string", enum: ["0","1","2"] },
         deadline:       { type: "string", description: "YYYY-MM-DD" },
         responsible_id: { type: "number" },
+        group_id:       { type: "number", description: "Новый проект/коллаб (group_id из словаря) — для переноса задачи между проектами" },
+        title:          { type: "string", description: "Новое название задачи" },
       },
       required: ["task_id"],
     },
@@ -635,11 +670,23 @@ const ANTHROPIC_TOOLS = [
   },
   {
     name: "delete_task",
-    description: "Удалить задачу из Bitrix24 по ID. Необратимо — используй только при явном подтверждении пользователя.",
+    description: "ПОЛНОСТЬЮ удалить задачу из Bitrix24 без возможности восстановления. Используй только если пользователь явно сказал 'удали навсегда' или 'без возврата'. В остальных случаях используй restore_task с action=archive.",
     input_schema: {
       type: "object",
       properties: { task_id: { type: "number" } },
       required: ["task_id"],
+    },
+  },
+  {
+    name: "restore_task",
+    description: "Архивировать задачу (мягкое удаление — статус 'отложена' + пометка [АРХИВ], можно восстановить) или восстановить ранее заархивированную задачу.",
+    input_schema: {
+      type: "object",
+      properties: {
+        task_id: { type: "number" },
+        action: { type: "string", enum: ["archive", "unarchive"], description: "archive - спрятать задачу (по умолчанию для 'удали'), unarchive - вернуть из архива" },
+      },
+      required: ["task_id", "action"],
     },
   },
 ];
@@ -936,7 +983,7 @@ server.tool("get_project_summary",
   async ({ group_id, days_back = 7 }) => {
     const [openResult, closedResult] = await Promise.all([
       bx("tasks.task.list", {
-        filter: { GROUP_ID: group_id, "!STATUS": "4" },
+        filter: { GROUP_ID: group_id, "!STATUS": ["4","5"] },
         select: ["ID","TITLE","STATUS","PRIORITY","RESPONSIBLE_ID","DEADLINE"],
         order: { PRIORITY: "DESC", DEADLINE: "ASC" },
       }),
@@ -1051,7 +1098,7 @@ server.tool("overdue_report",
   "Показать все просроченные задачи по всем сотрудникам — кто что не сделал вовремя.",
   { group_id: z.number().optional().describe("ID проекта для фильтра") },
   async ({ group_id }) => {
-    const filter = { "<=DEADLINE": new Date().toISOString(), "!STATUS": "4" };
+    const filter = { "<=DEADLINE": new Date().toISOString(), "!STATUS": ["4","5"] };
     if (group_id) filter.GROUP_ID = group_id;
 
     const result = await bx("tasks.task.list", {
@@ -1089,7 +1136,7 @@ server.tool("workload_report",
   "Показать загрузку каждого сотрудника — сколько задач у кого, кто перегружен.",
   { group_id: z.number().optional().describe("ID проекта для фильтра") },
   async ({ group_id }) => {
-    const filter = { "!STATUS": "4" };
+    const filter = { "!STATUS": ["4","5"] };
     if (group_id) filter.GROUP_ID = group_id;
 
     const result = await bx("tasks.task.list", {
@@ -1201,8 +1248,17 @@ function addToHistory(dialogId, role, content) {
 // ── Anthropic Client ───────────────────────────────────────────────────────
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-const BOT_SYSTEM = `Ты AI-ассистент Red Petroleum встроенный в Bitrix24. Тебя зовут RedBot.
+function getBotSystem() {
+  const today = new Date();
+  const todayStr = today.toLocaleDateString("ru-RU", { year: "numeric", month: "long", day: "numeric" });
+  const isoDate = today.toISOString().split("T")[0];
+
+  return `Ты AI-ассистент Red Petroleum встроенный в Bitrix24. Тебя зовут RedBot.
 Ты помогаешь сотрудникам отдела ОЦП работать с задачами и проектами в Bitrix24.
+
+СЕГОДНЯШНЯЯ ДАТА: ${todayStr} (${isoDate}).
+Когда пользователь говорит "дедлайн пятница", "через неделю", "до конца месяца" и т.п. —
+считай от сегодняшней даты (${isoDate}), а НЕ от даты твоего обучения. Если год не указан явно — год текущий.
 
 У тебя есть инструменты для работы с Bitrix24 — используй их для получения реальных данных,
 никогда не придумывай задачи, ID, статусы или ссылки самостоятельно.
@@ -1218,14 +1274,23 @@ ${Object.entries(PROJECTS).map(([key, p]) => `- ${key} → ${p.id} (${p.name})`)
 Для создания задач используй create_task. Если не хватает данных (например неясен исполнитель) —
 сначала вызови find_user чтобы найти ID, или уточни у пользователя.
 
-Для изменения статуса/приоритета/дедлайна используй update_task.
-Для удаления задачи используй delete_task — но только если пользователь явно подтвердил удаление.
+Для изменения статуса/приоритета/дедлайна/исполнителя/проекта/названия используй update_task —
+он поддерживает все эти поля сразу, включая group_id (перенос между проектами).
+СТАТУСЫ: 1-новая, 2-в работе, 3-ждёт контроля, 4-завершена(не подтв), 5-завершена, 6-отложена, 7-отклонена.
+Реально завершённые задачи имеют статус 5, НЕ 4.
+
+УДАЛЕНИЕ ЗАДАЧ: Bitrix24 удаляет задачи без возможности восстановления.
+Поэтому для "удаления" используй restore_task (поставит статус "отложена" и пометку [АРХИВ] в названии) —
+это безопасная альтернатива, задачу можно вернуть через update_task.
+Используй delete_task (полное удаление) ТОЛЬКО если пользователь явно написал "удали навсегда"
+или "точно удали без возврата".
 
 Все инструменты возвращают ссылки на задачи (формат "| https://...") — ВСЕГДА включай эти ссылки
 в свой ответ, чтобы пользователь мог кликнуть и открыть задачу.
 
 Отвечай коротко, по делу, на русском языке. Используй эмодзи для структуры.
 Если не понял запрос — попроси уточнить, не вызывай инструменты "на угад".`;
+}
 
 // ── Кэш профилей пользователей ──────────────────────────────────────────────
 const USER_PROFILES = new Map(); // userId -> { name, lastName, position }
@@ -1321,7 +1386,7 @@ app.post("/bot", express.urlencoded({ extended: true }), express.json(), async (
       const response = await anthropic.messages.create({
         model: "claude-haiku-4-5-20251001",
         max_tokens: 1500,
-        system: BOT_SYSTEM + userInfo,
+        system: getBotSystem() + userInfo,
         tools: ANTHROPIC_TOOLS,
         messages,
       });
@@ -1397,7 +1462,7 @@ app.post("/messages", express.json(), async (req, res) => {
 });
 
 app.get("/health", (_, res) =>
-  res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "6.0", tools: 18, bot: true, function_calling: true, memory: true, profiles: true, personal_webhooks: true })
+  res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "6.2", tools: 19, bot: true, function_calling: true, memory: true, profiles: true, personal_webhooks: true })
 );
 
 const PORT = process.env.PORT || 3000;
