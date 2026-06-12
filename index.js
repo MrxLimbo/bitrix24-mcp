@@ -648,9 +648,17 @@ async function buildContext(message, userId) {
   let context = "";
 
   try {
+    // Список всех проектов/коллабов
+    if (msg.includes("все коллаб") || msg.includes("все проект") || msg.includes("список проект") || msg.includes("какие проект") || msg.includes("список коллаб")) {
+      const unique = [...new Map(Object.values(PROJECTS).map(p => [p.id, p])).values()];
+      context = `Доступные проекты/коллабы (${unique.length}):\n` +
+        unique.map(p => `- ${p.name} (ID:${p.id})`).join("\n");
+    }
+
     // Ищем упоминание проекта
-    for (const [key, proj] of Object.entries(PROJECTS)) {
-      if (msg.includes(key)) {
+    if (!context) {
+      for (const [key, proj] of Object.entries(PROJECTS)) {
+        if (msg.includes(key)) {
         const result = await bx("tasks.task.list", {
           filter: { GROUP_ID: proj.id, "!STATUS": "4" },
           select: ["ID","TITLE","STATUS","DEADLINE","PRIORITY"],
@@ -666,6 +674,7 @@ async function buildContext(message, userId) {
             return `[${t.id}] ${pr}${t.title}${dl} — ${STATUS[t.status] || t.status}`;
           }).join("\n");
         break;
+        }
       }
     }
 
@@ -819,7 +828,7 @@ app.post("/messages", express.json(), async (req, res) => {
 });
 
 app.get("/health", (_, res) =>
-  res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "5.4", tools: 18, bot: true, memory: true, profiles: true })
+  res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "5.5", tools: 18, bot: true, memory: true, profiles: true })
 );
 
 const PORT = process.env.PORT || 3000;
