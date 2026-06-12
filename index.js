@@ -586,6 +586,7 @@ server.tool("delete_task",
 const BOT_CLIENTS = {
   "7358": "9c6yjlcm53b4ixr0v32gbuqz79zgw5ud",
   "7360": "ugjk1pbwylqhngmj7abkxstdv3pc94lr",
+  "7381": "qcv0l230bxtee7rr50z14a4sd5pthspu", // RedBot
 };
 
 // ── Память диалогов ─────────────────────────────────────────────────────────
