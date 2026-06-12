@@ -658,8 +658,21 @@ async function buildContext(message, userId) {
 
     // Ищем упоминание проекта
     if (!context) {
-      for (const [key, proj] of Object.entries(PROJECTS)) {
-        if (msg.includes(key)) {
+      const msgWords = msg.split(/\s+/).filter(w => w.length > 1);
+
+      // 1. Точное совпадение фразы
+      let matched = Object.entries(PROJECTS).find(([key]) => msg.includes(key));
+
+      // 2. Если не нашли — проверяем все слова ключа есть в сообщении (в любом порядке)
+      if (!matched) {
+        matched = Object.entries(PROJECTS).find(([key]) => {
+          const keyWords = key.split(/\s+/);
+          return keyWords.length > 1 && keyWords.every(kw => msgWords.includes(kw));
+        });
+      }
+
+      if (matched) {
+        const [, proj] = matched;
         const result = await bx("tasks.task.list", {
           filter: { GROUP_ID: proj.id, "!STATUS": "4" },
           select: ["ID","TITLE","STATUS","DEADLINE","PRIORITY"],
@@ -674,8 +687,6 @@ async function buildContext(message, userId) {
             const dl = t.deadline ? ` до ${new Date(t.deadline).toLocaleDateString("ru-RU")}` : "";
             return `[${t.id}] ${pr}${t.title}${dl} — ${STATUS[t.status] || t.status}`;
           }).join("\n");
-        break;
-        }
       }
     }
 
@@ -829,7 +840,7 @@ app.post("/messages", express.json(), async (req, res) => {
 });
 
 app.get("/health", (_, res) =>
-  res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "5.5", tools: 18, bot: true, memory: true, profiles: true })
+  res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "5.6", tools: 18, bot: true, memory: true, profiles: true })
 );
 
 const PORT = process.env.PORT || 3000;
