@@ -61,37 +61,589 @@ function taskLink(taskId, groupId) {
   return `${BITRIX_DOMAIN}/company/personal/user/0/tasks/task/view/${taskId}/`;
 }
 
-// Парсим блок ACTION:CREATE_TASK из ответа Claude
-function parseCreateTaskAction(text) {
-  const match = text.match(/ACTION:CREATE_TASK\s*([\s\S]*)/);
-  if (!match) return null;
-
-  const block = match[1];
-  const get = (key) => {
-    const m = block.match(new RegExp(`${key}:\\s*(.*)`, "i"));
-    return m ? m[1].trim() : "";
-  };
-
-  const title = get("TITLE");
-  if (!title) return null;
-
-  return {
-    title,
-    description: get("DESCRIPTION"),
-    responsibleId: get("RESPONSIBLE_ID"),
-    deadline: get("DEADLINE"),
-    groupId: get("GROUP_ID"),
-    checklist: get("CHECKLIST").split("|").map(s => s.trim()).filter(Boolean),
-    cleanText: text.slice(0, match.index).trim(),
-  };
-}
-
 const STATUS = {
   "1": "🆕 Новая", "2": "🔄 В работе", "3": "⏳ В ожидании",
   "4": "✅ Завершена", "5": "⏸️ Отложена", "6": "❌ Просрочена",
 };
 
 const PRIORITY = { "0": "низкий", "1": "средний", "2": "🔴 высокий" };
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TOOL HANDLERS — общая логика для MCP и для бота (function calling)
+// userId передаётся для использования личного вебхука (USER_WEBHOOKS)
+// ═══════════════════════════════════════════════════════════════════════════
+
+const TOOL_HANDLERS = {
+
+  create_task: async (input, userId) => {
+    const { title, description, responsible_id, deadline, priority, checklist, group_id } = input;
+    const fields = { TITLE: title, GROUP_ID: group_id || 290 };
+    if (description)    fields.DESCRIPTION   = description;
+    if (responsible_id) fields.RESPONSIBLE_ID = responsible_id;
+    if (deadline)       fields.DEADLINE       = deadline + "T23:59:00+06:00";
+    if (priority)       fields.PRIORITY       = priority;
+
+    const result = await bx("tasks.task.add", { fields }, userId);
+    const taskId = result.task?.id;
+
+    if (checklist?.length && taskId) {
+      for (const item of checklist) {
+        await bx("tasks.task.checklist.add", {
+          taskId, fields: { TITLE: item, PARENT_ID: 0, IS_COMPLETE: "N" }
+        }, userId);
+      }
+    }
+    const link = taskLink(taskId, fields.GROUP_ID);
+    return `✅ Задача создана!\nID: ${taskId} | ${title}${checklist?.length ? `\nЧек-лист: ${checklist.length} пунктов` : ""}\n${link}`;
+  },
+
+  manager_dashboard: async (input, userId) => {
+    const { group_id } = input;
+    const filter = {};
+    if (group_id) filter.GROUP_ID = group_id;
+
+    const result = await bx("tasks.task.list", {
+      filter,
+      select: ["ID","TITLE","STATUS","PRIORITY","RESPONSIBLE_ID","DEADLINE","GROUP_ID","CREATED_BY"],
+      order: { PRIORITY: "DESC", DEADLINE: "ASC" },
+    }, userId);
+
+    const tasks = result.tasks || [];
+    if (!tasks.length) return "Задач нет";
+
+    const now = new Date();
+    const overdue    = tasks.filter(t => t.deadline && new Date(t.deadline) < now && t.status !== "4");
+    const highPrio   = tasks.filter(t => t.priority === "2" && t.status !== "4");
+    const inProgress = tasks.filter(t => t.status === "2");
+    const newTasks   = tasks.filter(t => t.status === "1");
+    const done       = tasks.filter(t => t.status === "4");
+
+    const fmt = (t) => {
+      const dl = t.deadline ? ` · до ${new Date(t.deadline).toLocaleDateString("ru-RU")}` : "";
+      const pr = t.priority === "2" ? " 🔴" : "";
+      return `  [${t.id}] ${t.title}${pr}${dl} | ${taskLink(t.id, t.groupId)}`;
+    };
+
+    let text = `📊 ДАШБОРД — всего задач: ${tasks.length}\n${"═".repeat(44)}\n\n`;
+    if (overdue.length)  text += `🚨 ПРОСРОЧЕНО (${overdue.length}):\n${overdue.map(fmt).join("\n")}\n\n`;
+    if (highPrio.length) text += `🔴 ВЫСОКИЙ ПРИОРИТЕТ (${highPrio.length}):\n${highPrio.map(fmt).join("\n")}\n\n`;
+    text += `🔄 В РАБОТЕ (${inProgress.length}):\n${inProgress.length ? inProgress.map(fmt).join("\n") : "  —"}\n\n`;
+    text += `🆕 НОВЫЕ (${newTasks.length}):\n${newTasks.length ? newTasks.map(fmt).join("\n") : "  —"}\n\n`;
+    text += `✅ ЗАВЕРШЕНЫ (${done.length})\n`;
+    return text;
+  },
+
+  employee_tasks: async (input, userId) => {
+    const { responsible_id, status } = input;
+    const filter = { RESPONSIBLE_ID: responsible_id };
+    if (status === "active") filter["!STATUS"] = "4";
+    if (status === "done")   filter.STATUS = "4";
+
+    const result = await bx("tasks.task.list", {
+      filter,
+      select: ["ID","TITLE","STATUS","PRIORITY","DEADLINE","GROUP_ID"],
+      order: { ACTIVITY_DATE: "DESC" },
+    }, userId);
+
+    const tasks = result.tasks || [];
+    if (!tasks.length) return "Задач нет";
+
+    const now = new Date();
+    let text = `👤 Задачи сотрудника ID:${responsible_id} — всего: ${tasks.length}\n\n`;
+
+    const groups = {};
+    tasks.forEach(t => {
+      const s = STATUS[t.status] || t.status;
+      if (!groups[s]) groups[s] = [];
+      groups[s].push(t);
+    });
+
+    for (const [status, list] of Object.entries(groups)) {
+      text += `${status} (${list.length})\n`;
+      list.forEach(t => {
+        const dl = t.deadline ? ` · до ${new Date(t.deadline).toLocaleDateString("ru-RU")}` : "";
+        const overdue = t.deadline && new Date(t.deadline) < now && t.status !== "4" ? " ⚠️" : "";
+        text += `  [${t.id}] ${t.title}${dl}${overdue} | ${taskLink(t.id, t.groupId)}\n`;
+      });
+      text += "\n";
+    }
+    return text;
+  },
+
+  list_tasks: async (input, userId) => {
+    const { status, priority, group_id } = input;
+    const statusMap = { new:1, in_progress:2, waiting:3, completed:4, deferred:5 };
+    const filter = {};
+    if (status && status !== "all") filter.STATUS = statusMap[status];
+    if (priority) filter.PRIORITY = priority;
+    if (group_id) filter.GROUP_ID = group_id;
+
+    const result = await bx("tasks.task.list", {
+      filter,
+      select: ["ID","TITLE","STATUS","PRIORITY","RESPONSIBLE_ID","DEADLINE","GROUP_ID"],
+      order: { PRIORITY: "DESC", ACTIVITY_DATE: "DESC" },
+    }, userId);
+
+    const tasks = result.tasks || [];
+    if (!tasks.length) return "Задач нет";
+
+    const lines = tasks.map(t => {
+      const pr = t.priority === "2" ? " 🔴" : "";
+      const dl = t.deadline ? ` · до ${new Date(t.deadline).toLocaleDateString("ru-RU")}` : "";
+      return `[${t.id}] ${t.title}${pr}\n  ${STATUS[t.status] || t.status}${dl} | ${taskLink(t.id, t.groupId)}`;
+    }).join("\n\n");
+
+    return `Задачи (${tasks.length}):\n\n${lines}`;
+  },
+
+  get_task: async (input, userId) => {
+    const { task_id } = input;
+    const result = await bx("tasks.task.get", { taskId: task_id }, userId);
+    const t = result.task;
+    const lines = [
+      `Задача #${t.id}: ${t.title}`,
+      `Статус: ${STATUS[t.status] || t.status}`,
+      `Приоритет: ${PRIORITY[t.priority] || t.priority}`,
+      t.groupId       ? `Проект (group_id): ${t.groupId}`     : null,
+      t.responsibleId ? `Ответственный ID: ${t.responsibleId}` : null,
+      t.createdBy     ? `Постановщик ID: ${t.createdBy}`       : null,
+      t.description   ? `Описание: ${t.description}`          : null,
+      t.deadline      ? `Дедлайн: ${new Date(t.deadline).toLocaleDateString("ru-RU")}` : null,
+      `Ссылка: ${taskLink(t.id, t.groupId)}`,
+    ].filter(Boolean).join("\n");
+    return lines;
+  },
+
+  update_task: async (input, userId) => {
+    const { task_id, status, priority, deadline, responsible_id } = input;
+    const fields = {};
+    if (status)         fields.STATUS         = status;
+    if (priority)       fields.PRIORITY       = priority;
+    if (deadline)       fields.DEADLINE       = deadline + "T23:59:00+06:00";
+    if (responsible_id) fields.RESPONSIBLE_ID = responsible_id;
+
+    await bx("tasks.task.update", { taskId: task_id, fields }, userId);
+    return `✅ Задача #${task_id} обновлена`;
+  },
+
+  send_message: async (input, userId) => {
+    const { user_id, message } = input;
+    await bx("im.message.add", { USER_ID: user_id, MESSAGE: message }, userId);
+    return `✅ Сообщение отправлено → ID:${user_id}`;
+  },
+
+  find_user: async (input, userId) => {
+    const { name } = input;
+    const result = await bx("user.search", { FIND: name }, userId);
+    const users = Array.isArray(result) ? result : [];
+    if (!users.length) return `Сотрудник "${name}" не найден`;
+
+    return `Найдено (${users.length}):\n\n` + users.map(u =>
+      `ID: ${u.ID} | ${u.NAME} ${u.LAST_NAME} | ${u.WORK_POSITION || "—"} | ${u.EMAIL || ""}`
+    ).join("\n");
+  },
+
+  get_all_users: async (input, userId) => {
+    const result = await bx("user.get", {
+      filter: { ACTIVE: true },
+      select: ["ID","NAME","LAST_NAME","WORK_POSITION","EMAIL"],
+      order: { NAME: "ASC" },
+    }, userId);
+    const users = Array.isArray(result) ? result : [];
+    if (!users.length) return "Сотрудников нет";
+
+    return `Сотрудники (${users.length}):\n\n` + users.map(u =>
+      `ID:${u.ID} | ${u.NAME} ${u.LAST_NAME}${u.WORK_POSITION ? ` | ${u.WORK_POSITION}` : ""}`
+    ).join("\n");
+  },
+
+  find_project: async (input) => {
+    const { name } = input;
+    const search = name.toLowerCase().trim();
+    const known = PROJECTS[search];
+    if (known) return `✅ Найден: ${known.name} | GROUP_ID: ${known.id}`;
+
+    const partial = Object.entries(PROJECTS).find(([key]) => key.includes(search) || search.includes(key));
+    if (partial) return `✅ Найден: ${partial[1].name} | GROUP_ID: ${partial[1].id}`;
+
+    const list = [...new Set(Object.values(PROJECTS).map(p => `ID:${p.id} | ${p.name}`))].join("\n");
+    return `Проект "${name}" не найден.\n\nИзвестные проекты:\n${list}`;
+  },
+
+  get_project_summary: async (input, userId) => {
+    const { group_id, days_back = 7 } = input;
+    const [openResult, closedResult] = await Promise.all([
+      bx("tasks.task.list", {
+        filter: { GROUP_ID: group_id, "!STATUS": "4" },
+        select: ["ID","TITLE","STATUS","PRIORITY","RESPONSIBLE_ID","DEADLINE"],
+        order: { PRIORITY: "DESC", DEADLINE: "ASC" },
+      }, userId),
+      bx("tasks.task.list", {
+        filter: {
+          GROUP_ID: group_id,
+          STATUS: "4",
+          ">=CLOSED_DATE": new Date(Date.now() - days_back * 86400000).toISOString().split("T")[0],
+        },
+        select: ["ID","TITLE","RESPONSIBLE_ID","CLOSED_DATE"],
+        order: { CLOSED_DATE: "DESC" },
+      }, userId),
+    ]);
+
+    const open   = openResult.tasks   || [];
+    const closed = closedResult.tasks || [];
+    const now    = new Date();
+
+    const overdue = open.filter(t => t.deadline && new Date(t.deadline) < now);
+    const high    = open.filter(t => t.priority === "2");
+
+    let text = `📁 ПРОЕКТ ID:${group_id}\n${"═".repeat(40)}\n\n`;
+    text += `📊 Открытых задач: ${open.length} | Просрочено: ${overdue.length} | Высокий приоритет: ${high.length}\n\n`;
+
+    if (overdue.length) {
+      text += `🚨 ПРОСРОЧЕНО:\n`;
+      overdue.forEach(t => { text += `  [${t.id}] ${t.title} · до ${new Date(t.deadline).toLocaleDateString("ru-RU")} | ${taskLink(t.id, group_id)}\n`; });
+      text += "\n";
+    }
+    if (high.length) {
+      text += `🔴 ВЫСОКИЙ ПРИОРИТЕТ:\n`;
+      high.forEach(t => { text += `  [${t.id}] ${t.title} | ${taskLink(t.id, group_id)}\n`; });
+      text += "\n";
+    }
+
+    text += `🔄 ВСЕ ОТКРЫТЫЕ (${open.length}):\n`;
+    if (open.length) {
+      open.forEach(t => {
+        const dl  = t.deadline ? ` · до ${new Date(t.deadline).toLocaleDateString("ru-RU")}` : "";
+        const pr  = t.priority === "2" ? " 🔴" : "";
+        text += `  [${t.id}] ${t.title}${pr}${dl} — ${STATUS[t.status] || t.status} | ${taskLink(t.id, group_id)}\n`;
+      });
+    } else { text += "  Нет открытых задач\n"; }
+
+    text += `\n✅ ЗАКРЫТО ЗА ${days_back} ДНЕЙ (${closed.length}):\n`;
+    if (closed.length) {
+      closed.forEach(t => {
+        const dt = t.closedDate ? new Date(t.closedDate).toLocaleDateString("ru-RU") : "—";
+        text += `  [${t.id}] ${t.title} · закрыта ${dt}\n`;
+      });
+    } else { text += "  Нет закрытых задач за период\n"; }
+
+    return text;
+  },
+
+  add_task_comment: async (input, userId) => {
+    const { task_id, comment } = input;
+    await bx("task.commentitem.add", { TASK_ID: task_id, fields: { POST_MESSAGE: comment } }, userId);
+    return `✅ Комментарий добавлен к задаче #${task_id}`;
+  },
+
+  get_task_comments: async (input, userId) => {
+    const { task_id } = input;
+    const result = await bx("task.commentitem.getList", { TASK_ID: task_id }, userId);
+    const comments = Array.isArray(result) ? result : result && typeof result === "object" ? Object.values(result) : [];
+    if (!comments.length) return "Комментариев нет";
+
+    const lines = comments.map(c => {
+      const date = c.POST_DATE ? new Date(c.POST_DATE).toLocaleDateString("ru-RU") : "—";
+      const author = c.AUTHOR_ID ? `ID:${c.AUTHOR_ID}` : "—";
+      return `[${date}] ${author}\n${c.POST_MESSAGE || "—"}`;
+    }).join("\n\n─────\n\n");
+
+    return `Комментарии к задаче #${task_id} (${comments.length}):\n\n${lines}`;
+  },
+
+  add_checklist_item: async (input, userId) => {
+    const { task_id, item } = input;
+    await bx("tasks.task.checklist.add", {
+      taskId: task_id,
+      fields: { TITLE: item, PARENT_ID: 0, IS_COMPLETE: "N" },
+    }, userId);
+    return `✅ Пункт добавлен в чек-лист задачи #${task_id}: "${item}"`;
+  },
+
+  overdue_report: async (input, userId) => {
+    const { group_id } = input;
+    const filter = { "<=DEADLINE": new Date().toISOString(), "!STATUS": "4" };
+    if (group_id) filter.GROUP_ID = group_id;
+
+    const result = await bx("tasks.task.list", {
+      filter,
+      select: ["ID","TITLE","STATUS","RESPONSIBLE_ID","DEADLINE","GROUP_ID"],
+      order: { DEADLINE: "ASC" },
+    }, userId);
+
+    const tasks = result.tasks || [];
+    if (!tasks.length) return "✅ Просроченных задач нет!";
+
+    const byUser = {};
+    tasks.forEach(t => {
+      const uid = t.responsibleId || "?";
+      if (!byUser[uid]) byUser[uid] = [];
+      byUser[uid].push(t);
+    });
+
+    let text = `🚨 ПРОСРОЧЕННЫЕ ЗАДАЧИ — всего: ${tasks.length}\n${"═".repeat(40)}\n\n`;
+    for (const [uid, list] of Object.entries(byUser)) {
+      text += `👤 Ответственный ID:${uid} (${list.length} задач)\n`;
+      list.forEach(t => {
+        const days = Math.floor((Date.now() - new Date(t.deadline)) / 86400000);
+        text += `  [${t.id}] ${t.title} · просрочено на ${days} дн. | ${taskLink(t.id, t.groupId)}\n`;
+      });
+      text += "\n";
+    }
+    return text;
+  },
+
+  workload_report: async (input, userId) => {
+    const { group_id } = input;
+    const filter = { "!STATUS": "4" };
+    if (group_id) filter.GROUP_ID = group_id;
+
+    const result = await bx("tasks.task.list", {
+      filter,
+      select: ["ID","TITLE","STATUS","PRIORITY","RESPONSIBLE_ID","DEADLINE"],
+      order: { ACTIVITY_DATE: "DESC" },
+    }, userId);
+
+    const tasks  = result.tasks || [];
+    const now    = new Date();
+    const byUser = {};
+
+    tasks.forEach(t => {
+      const uid = t.responsibleId || "?";
+      if (!byUser[uid]) byUser[uid] = { total: 0, high: 0, overdue: 0 };
+      byUser[uid].total++;
+      if (t.priority === "2") byUser[uid].high++;
+      if (t.deadline && new Date(t.deadline) < now) byUser[uid].overdue++;
+    });
+
+    const sorted = Object.entries(byUser).sort((a, b) => b[1].total - a[1].total);
+
+    let text = `📊 ЗАГРУЗКА СОТРУДНИКОВ — активных задач: ${tasks.length}\n${"═".repeat(40)}\n\n`;
+    sorted.forEach(([uid, data]) => {
+      const bar = "█".repeat(Math.min(data.total, 10));
+      text += `👤 ID:${uid} ${bar} ${data.total} задач`;
+      if (data.overdue) text += ` | ⚠️ просрочено: ${data.overdue}`;
+      if (data.high)    text += ` | 🔴 высокий приоритет: ${data.high}`;
+      text += "\n";
+    });
+    return text;
+  },
+
+  get_collab_chat: async (input, userId) => {
+    const { group_id, limit = 20 } = input;
+    const chatInfo = await bx("im.chat.get", { DIALOG_ID: `SG${group_id}` }, userId);
+    const chatId = chatInfo?.id || chatInfo?.ID;
+    if (!chatId) return `Чат для коллаба ID:${group_id} не найден`;
+
+    const result = await bx("im.message.getList", { CHAT_ID: chatId, LAST_N: limit }, userId);
+    const messages = Array.isArray(result?.messages) ? result.messages : result?.messages ? Object.values(result.messages) : [];
+    if (!messages.length) return "Сообщений нет";
+
+    const lines = messages.map(m => {
+      const date = m.DATE ? new Date(m.DATE).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—";
+      const author = m.AUTHOR_ID ? `ID:${m.AUTHOR_ID}` : "—";
+      return `[${date}] ${author}:\n${m.MESSAGE || m.TEXT || "—"}`;
+    }).join("\n\n");
+
+    return `💬 Чат коллаба ID:${group_id} (последние ${messages.length} сообщений):\n${"─".repeat(36)}\n\n${lines}`;
+  },
+
+  delete_task: async (input, userId) => {
+    const { task_id } = input;
+    await bx("tasks.task.delete", { taskId: task_id }, userId);
+    return `✅ Задача #${task_id} удалена`;
+  },
+
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ANTHROPIC TOOLS SCHEMA — для function calling в боте
+// ═══════════════════════════════════════════════════════════════════════════
+
+const ANTHROPIC_TOOLS = [
+  {
+    name: "create_task",
+    description: "Создать задачу в Bitrix24 с чек-листом, дедлайном и ответственным.",
+    input_schema: {
+      type: "object",
+      properties: {
+        title:          { type: "string", description: "Название задачи" },
+        description:    { type: "string", description: "Описание" },
+        responsible_id: { type: "number", description: "ID ответственного" },
+        deadline:       { type: "string", description: "Дедлайн YYYY-MM-DD" },
+        priority:       { type: "string", enum: ["0","1","2"], description: "0-низкий 1-средний 2-высокий" },
+        checklist:      { type: "array", items: { type: "string" }, description: "Пункты чек-листа" },
+        group_id:       { type: "number", description: "ID проекта/группы из словаря проектов" },
+      },
+      required: ["title"],
+    },
+  },
+  {
+    name: "manager_dashboard",
+    description: "Полный дашборд — все задачи по статусам, просроченные, высокий приоритет.",
+    input_schema: {
+      type: "object",
+      properties: { group_id: { type: "number", description: "ID проекта для фильтра (опционально)" } },
+    },
+  },
+  {
+    name: "employee_tasks",
+    description: "Показать все задачи конкретного сотрудника по его ID.",
+    input_schema: {
+      type: "object",
+      properties: {
+        responsible_id: { type: "number", description: "ID сотрудника" },
+        status: { type: "string", enum: ["all","active","done"] },
+      },
+      required: ["responsible_id"],
+    },
+  },
+  {
+    name: "list_tasks",
+    description: "Список задач с фильтрами по статусу, приоритету или проекту.",
+    input_schema: {
+      type: "object",
+      properties: {
+        status:   { type: "string", enum: ["all","new","in_progress","waiting","completed","deferred"] },
+        priority: { type: "string", enum: ["0","1","2"] },
+        group_id: { type: "number", description: "ID проекта" },
+      },
+    },
+  },
+  {
+    name: "get_task",
+    description: "Полная информация по задаче по её ID — описание, статус, ответственный, ссылка.",
+    input_schema: {
+      type: "object",
+      properties: { task_id: { type: "number" } },
+      required: ["task_id"],
+    },
+  },
+  {
+    name: "update_task",
+    description: "Изменить статус, приоритет, дедлайн или ответственного у существующей задачи.",
+    input_schema: {
+      type: "object",
+      properties: {
+        task_id:        { type: "number" },
+        status:         { type: "string", enum: ["1","2","3","4","5"], description: "1-новая 2-в работе 3-ожидание 4-завершена 5-отложена" },
+        priority:       { type: "string", enum: ["0","1","2"] },
+        deadline:       { type: "string", description: "YYYY-MM-DD" },
+        responsible_id: { type: "number" },
+      },
+      required: ["task_id"],
+    },
+  },
+  {
+    name: "send_message",
+    description: "Отправить личное сообщение сотруднику в Bitrix24.",
+    input_schema: {
+      type: "object",
+      properties: {
+        user_id: { type: "number" },
+        message: { type: "string" },
+      },
+      required: ["user_id", "message"],
+    },
+  },
+  {
+    name: "find_user",
+    description: "Найти сотрудника по имени или фамилии, получить его ID.",
+    input_schema: {
+      type: "object",
+      properties: { name: { type: "string" } },
+      required: ["name"],
+    },
+  },
+  {
+    name: "get_all_users",
+    description: "Список всех активных сотрудников компании с их ID.",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "find_project",
+    description: "Найти проект/коллаб по названию и получить его group_id.",
+    input_schema: {
+      type: "object",
+      properties: { name: { type: "string" } },
+      required: ["name"],
+    },
+  },
+  {
+    name: "get_project_summary",
+    description: "Полная сводка по проекту — открытые/просроченные/закрытые задачи.",
+    input_schema: {
+      type: "object",
+      properties: {
+        group_id:  { type: "number" },
+        days_back: { type: "number", description: "За сколько дней смотреть закрытые (по умолчанию 7)" },
+      },
+      required: ["group_id"],
+    },
+  },
+  {
+    name: "add_task_comment",
+    description: "Добавить комментарий к задаче.",
+    input_schema: {
+      type: "object",
+      properties: { task_id: { type: "number" }, comment: { type: "string" } },
+      required: ["task_id", "comment"],
+    },
+  },
+  {
+    name: "get_task_comments",
+    description: "Прочитать комментарии к задаче.",
+    input_schema: {
+      type: "object",
+      properties: { task_id: { type: "number" } },
+      required: ["task_id"],
+    },
+  },
+  {
+    name: "add_checklist_item",
+    description: "Добавить пункт в чек-лист существующей задачи.",
+    input_schema: {
+      type: "object",
+      properties: { task_id: { type: "number" }, item: { type: "string" } },
+      required: ["task_id", "item"],
+    },
+  },
+  {
+    name: "overdue_report",
+    description: "Показать все просроченные задачи по всем сотрудникам с ID исполнителей.",
+    input_schema: {
+      type: "object",
+      properties: { group_id: { type: "number", description: "Опционально — фильтр по проекту" } },
+    },
+  },
+  {
+    name: "workload_report",
+    description: "Загрузка каждого сотрудника — сколько задач, просрочки, приоритеты.",
+    input_schema: {
+      type: "object",
+      properties: { group_id: { type: "number", description: "Опционально — фильтр по проекту" } },
+    },
+  },
+  {
+    name: "get_collab_chat",
+    description: "Прочитать переписку в чате коллаба (может не работать на этой версии Bitrix24).",
+    input_schema: {
+      type: "object",
+      properties: { group_id: { type: "number" }, limit: { type: "number" } },
+      required: ["group_id"],
+    },
+  },
+  {
+    name: "delete_task",
+    description: "Удалить задачу из Bitrix24 по ID. Необратимо — используй только при явном подтверждении пользователя.",
+    input_schema: {
+      type: "object",
+      properties: { task_id: { type: "number" } },
+      required: ["task_id"],
+    },
+  },
+];
+
 
 const server = new McpServer({ name: "bitrix24-ocp", version: "2.0.0" });
 
@@ -649,38 +1201,31 @@ function addToHistory(dialogId, role, content) {
 // ── Anthropic Client ───────────────────────────────────────────────────────
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-const BOT_SYSTEM = `Ты AI-ассистент Red Petroleum встроенный в Bitrix24. Тебя зовут Red AI.
-Ты помогаешь сотрудникам работать с задачами и проектами.
+const BOT_SYSTEM = `Ты AI-ассистент Red Petroleum встроенный в Bitrix24. Тебя зовут RedBot.
+Ты помогаешь сотрудникам отдела ОЦП работать с задачами и проектами в Bitrix24.
 
-Что ты умеешь:
-- Показывать задачи сотрудников и проектов
-- Создавать задачи
-- Показывать статусы проектов (RedPay, RedMarket, RedLogist, RedPro, Оптимум, КЦ, Альфа и др.)
-- Анализировать загрузку команды
-- Показывать просроченные задачи
+У тебя есть инструменты для работы с Bitrix24 — используй их для получения реальных данных,
+никогда не придумывай задачи, ID, статусы или ссылки самостоятельно.
+
+СЛОВАРЬ ПРОЕКТОВ (название → group_id):
+${Object.entries(PROJECTS).map(([key, p]) => `- ${key} → ${p.id} (${p.name})`).join("\n")}
+
+Если пользователь упоминает проект по любому из этих названий — используй соответствующий group_id
+в вызовах инструментов (list_tasks, get_project_summary, overdue_report, workload_report и т.д.).
+
+Если пользователь просит "мои задачи" — используй его ID (указан выше) как responsible_id в employee_tasks.
+
+Для создания задач используй create_task. Если не хватает данных (например неясен исполнитель) —
+сначала вызови find_user чтобы найти ID, или уточни у пользователя.
+
+Для изменения статуса/приоритета/дедлайна используй update_task.
+Для удаления задачи используй delete_task — но только если пользователь явно подтвердил удаление.
+
+Все инструменты возвращают ссылки на задачи (формат "| https://...") — ВСЕГДА включай эти ссылки
+в свой ответ, чтобы пользователь мог кликнуть и открыть задачу.
 
 Отвечай коротко, по делу, на русском языке. Используй эмодзи для структуры.
-Если не понял запрос — попроси уточнить.
-
-Если в данных из Bitrix24 есть ссылка на задачу (формат "| https://..."),
-ВСЕГДА включай эту ссылку в свой ответ — пользователь может кликнуть и сразу открыть задачу.
-Если ссылки нет в данных — не придумывай и не генерируй её сам.
-
-СОЗДАНИЕ ЗАДАЧ:
-Если пользователь просит создать задачу и у тебя есть хотя бы НАЗВАНИЕ задачи —
-в конце своего ответа добавь строго отдельным блоком (на новой строке):
-
-ACTION:CREATE_TASK
-TITLE: <название>
-DESCRIPTION: <описание, если есть, иначе пусто>
-RESPONSIBLE_ID: <ID ответственного, если известен, иначе пусто>
-DEADLINE: <YYYY-MM-DD, если есть, иначе пусто>
-GROUP_ID: <ID проекта из словаря, если упомянут проект, иначе пусто>
-CHECKLIST: <пункты чек-листа через " | " (вертикальная черта с пробелами), если есть, иначе пусто>
-
-Этот блок НЕ показывается пользователю — он обрабатывается автоматически.
-Перед блоком напиши обычным текстом что собираешься создать.
-Если не хватает названия задачи — НЕ добавляй блок, просто уточни у пользователя.`;
+Если не понял запрос — попроси уточнить, не вызывай инструменты "на угад".`;
 
 // ── Кэш профилей пользователей ──────────────────────────────────────────────
 const USER_PROFILES = new Map(); // userId -> { name, lastName, position }
@@ -702,88 +1247,6 @@ async function getUserProfile(userId) {
     console.error("getUserProfile error:", e.message);
     return null;
   }
-}
-
-async function buildContext(message, userId) {
-  const msg = message.toLowerCase();
-  let context = "";
-
-  try {
-    // Список всех проектов/коллабов
-    if (msg.includes("все коллаб") || msg.includes("все проект") || msg.includes("список проект") || msg.includes("какие проект") || msg.includes("список коллаб")) {
-      const unique = [...new Map(Object.values(PROJECTS).map(p => [p.id, p])).values()];
-      context = `Доступные проекты/коллабы (${unique.length}):\n` +
-        unique.map(p => `- ${p.name} (ID:${p.id})`).join("\n");
-    }
-
-    // Ищем упоминание проекта
-    if (!context) {
-      const msgWords = msg.split(/\s+/).filter(w => w.length > 1);
-
-      // 1. Точное совпадение фразы
-      let matched = Object.entries(PROJECTS).find(([key]) => msg.includes(key));
-
-      // 2. Если не нашли — проверяем все слова ключа есть в сообщении (в любом порядке)
-      if (!matched) {
-        matched = Object.entries(PROJECTS).find(([key]) => {
-          const keyWords = key.split(/\s+/);
-          return keyWords.length > 1 && keyWords.every(kw => msgWords.includes(kw));
-        });
-      }
-
-      if (matched) {
-        const [, proj] = matched;
-        const result = await bx("tasks.task.list", {
-          filter: { GROUP_ID: proj.id, "!STATUS": "4" },
-          select: ["ID","TITLE","STATUS","DEADLINE","PRIORITY"],
-          order: { PRIORITY: "DESC" },
-        });
-        const tasks = result.tasks || [];
-        const now = new Date();
-        const overdue = tasks.filter(t => t.deadline && new Date(t.deadline) < now);
-        context = `Проект: ${proj.name} (group_id: ${proj.id}) | Открытых: ${tasks.length} | Просрочено: ${overdue.length}\n` +
-          tasks.slice(0, 15).map(t => {
-            const pr = t.priority === "2" ? "🔴" : "";
-            const dl = t.deadline ? ` до ${new Date(t.deadline).toLocaleDateString("ru-RU")}` : "";
-            return `[${t.id}] ${pr}${t.title}${dl} — ${STATUS[t.status] || t.status} | ${taskLink(t.id, proj.id)}`;
-          }).join("\n");
-      }
-    }
-
-    // Мои задачи
-    if (!context && (msg.includes("мои задач") || msg.includes("my task") || msg.includes("мои"))) {
-      const result = await bx("tasks.task.list", {
-        filter: { RESPONSIBLE_ID: parseInt(userId), "!STATUS": "4" },
-        select: ["ID","TITLE","STATUS","DEADLINE","PRIORITY","GROUP_ID"],
-        order: { ACTIVITY_DATE: "DESC" },
-      });
-      const tasks = result.tasks || [];
-      context = `Твои задачи (${tasks.length}):\n` +
-        tasks.slice(0, 15).map(t =>
-          `[${t.id}] ${t.title} — ${STATUS[t.status] || t.status} | ${taskLink(t.id, t.groupId)}`
-        ).join("\n");
-    }
-
-    // Просроченные
-    if (!context && (msg.includes("просроч") || msg.includes("горит") || msg.includes("overdue"))) {
-      const result = await bx("tasks.task.list", {
-        filter: { "<=DEADLINE": new Date().toISOString(), "!STATUS": "4" },
-        select: ["ID","TITLE","STATUS","RESPONSIBLE_ID","DEADLINE","GROUP_ID"],
-        order: { DEADLINE: "ASC" },
-      });
-      const tasks = result.tasks || [];
-      context = `🚨 Просроченные задачи (${tasks.length}):\n` +
-        tasks.slice(0, 15).map(t => {
-          const days = Math.floor((Date.now() - new Date(t.deadline)) / 86400000);
-          const resp = t.responsibleId ? ` | исполнитель ID:${t.responsibleId}` : "";
-          return `[${t.id}] ${t.title} · просрочено ${days} дн.${resp} | ${taskLink(t.id, t.groupId)}`;
-        }).join("\n");
-    }
-  } catch (e) {
-    console.error("Context error:", e.message);
-  }
-
-  return context;
 }
 
 // ── Express + SSE ──────────────────────────────────────────────────────────
@@ -840,50 +1303,62 @@ app.post("/bot", express.urlencoded({ extended: true }), express.json(), async (
 
   try {
     const profile = await getUserProfile(userId);
-    const context = await buildContext(message, userId);
-    const userMsg = context ? `${message}\n\nДанные из Bitrix24:\n${context}` : message;
 
     const userInfo = profile
-      ? `\n\nПользователь который пишет тебе: ${profile.name} ${profile.lastName}${profile.position ? ` (${profile.position})` : ""}. ID:${userId}. Обращайся к нему по имени, если уместно.`
-      : "";
+      ? `\n\nПользователь который пишет тебе: ${profile.name} ${profile.lastName}${profile.position ? ` (${profile.position})` : ""}. ID:${userId}. Обращайся к нему по имени, если уместно. Если он просит "мои задачи" — используй этот ID как responsible_id.`
+      : `\n\nID пользователя который пишет тебе: ${userId}.`;
 
     // Берём историю диалога + новое сообщение
     const history = getHistory(dialogId);
-    const messages = [...history, { role: "user", content: userMsg }];
+    let messages = [...history, { role: "user", content: message }];
 
-    console.log("🧠 Calling Claude API...");
-    const response = await anthropic.messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 1000,
-      system: BOT_SYSTEM + userInfo,
-      messages,
-    });
+    console.log("🧠 Calling Claude API with tools...");
 
-    let answer = response.content[0]?.text || "Не могу ответить, попробуй снова.";
-    console.log("✅ Claude answer:", answer.slice(0, 100));
+    let finalAnswer = "";
+    const MAX_ITERATIONS = 6;
 
-    // Проверяем не хочет ли Claude создать задачу
-    const action = parseCreateTaskAction(answer);
-    if (action) {
-      console.log("🛠️ Creating task:", action.title);
-      try {
-        const fields = { TITLE: action.title, GROUP_ID: action.groupId ? parseInt(action.groupId) : 290 };
-        if (action.description)   fields.DESCRIPTION = action.description;
-        if (action.responsibleId) fields.RESPONSIBLE_ID = parseInt(action.responsibleId);
-        if (action.deadline)      fields.DEADLINE = action.deadline + "T23:59:00+06:00";
+    for (let i = 0; i < MAX_ITERATIONS; i++) {
+      const response = await anthropic.messages.create({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 1500,
+        system: BOT_SYSTEM + userInfo,
+        tools: ANTHROPIC_TOOLS,
+        messages,
+      });
 
-        const result = await bx("tasks.task.add", { fields }, userId);
-        const taskId = result.task?.id;
-        const link = taskLink(taskId, fields.GROUP_ID);
+      // Собираем текстовые части ответа
+      const textParts = response.content.filter(b => b.type === "text").map(b => b.text);
+      if (textParts.length) finalAnswer += (finalAnswer ? "\n" : "") + textParts.join("\n");
 
-        answer = `${action.cleanText}\n\n✅ Задача создана! #${taskId}\n${link}`;
-      } catch (e) {
-        console.error("Create task error:", e.message);
-        answer = `${action.cleanText}\n\n⚠️ Не получилось создать задачу: ${e.message}`;
+      if (response.stop_reason !== "tool_use") {
+        break; // Claude закончил, больше тулов не вызывает
       }
+
+      // Выполняем все запрошенные tool_use блоки
+      const toolUses = response.content.filter(b => b.type === "tool_use");
+      messages.push({ role: "assistant", content: response.content });
+
+      const toolResults = [];
+      for (const tu of toolUses) {
+        console.log(`🛠️ Tool call: ${tu.name}`, JSON.stringify(tu.input));
+        let resultText;
+        try {
+          const handler = TOOL_HANDLERS[tu.name];
+          resultText = handler ? await handler(tu.input, userId) : `Инструмент ${tu.name} не найден`;
+        } catch (e) {
+          console.error(`Tool error (${tu.name}):`, e.message);
+          resultText = `Ошибка при вызове ${tu.name}: ${e.message}`;
+        }
+        toolResults.push({ type: "tool_result", tool_use_id: tu.id, content: resultText });
+      }
+
+      messages.push({ role: "user", content: toolResults });
     }
 
-    // Сохраняем обмен в историю (без контекста Bitrix24, чтобы не раздувать)
+    const answer = finalAnswer || "Не могу ответить, попробуй снова.";
+    console.log("✅ Final answer:", answer.slice(0, 150));
+
+    // Сохраняем в историю только текстовый обмен (без tool_use деталей)
     addToHistory(dialogId, "user", message);
     addToHistory(dialogId, "assistant", answer);
 
@@ -922,7 +1397,7 @@ app.post("/messages", express.json(), async (req, res) => {
 });
 
 app.get("/health", (_, res) =>
-  res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "5.9", tools: 18, bot: true, memory: true, profiles: true, links: true, create_task: true, personal_webhooks: true })
+  res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "6.0", tools: 18, bot: true, function_calling: true, memory: true, profiles: true, personal_webhooks: true })
 );
 
 const PORT = process.env.PORT || 3000;
