@@ -297,18 +297,19 @@ const TOOL_HANDLERS = {
 
   get_project_summary: async (input, userId) => {
     const { group_id, days_back = 7 } = input;
+    const closedFilter = { GROUP_ID: group_id, STATUS: "5" };
+    // days_back=0 означает "за всё время" — без ограничения по дате
+    if (days_back > 0) {
+      closedFilter[">=CLOSED_DATE"] = new Date(Date.now() - days_back * 86400000).toISOString().split("T")[0];
+    }
     const [openResult, closedResult] = await Promise.all([
       bx("tasks.task.list", {
-        filter: { GROUP_ID: group_id, "!STATUS": ["5","7"] },  // всё кроме Завершена и Отклонена
+        filter: { GROUP_ID: group_id, "!STATUS": ["5","7"] },
         select: ["ID","TITLE","STATUS","PRIORITY","RESPONSIBLE_ID","DEADLINE"],
         order: { PRIORITY: "DESC", DEADLINE: "ASC" },
       }, userId),
       bx("tasks.task.list", {
-        filter: {
-          GROUP_ID: group_id,
-          STATUS: "5",  // только реально завершённые
-          ">=CLOSED_DATE": new Date(Date.now() - days_back * 86400000).toISOString().split("T")[0],
-        },
+        filter: closedFilter,
         select: ["ID","TITLE","RESPONSIBLE_ID","CLOSED_DATE"],
         order: { CLOSED_DATE: "DESC" },
       }, userId),
@@ -344,7 +345,7 @@ const TOOL_HANDLERS = {
       });
     } else { text += "  Нет открытых задач\n"; }
 
-    text += `\n✅ ЗАКРЫТО ЗА ${days_back} ДНЕЙ (${closed.length}):\n`;
+    text += `\n✅ ${days_back === 0 ? "ВСЕ ЗАКРЫТЫЕ" : `ЗАКРЫТО ЗА ${days_back} ДНЕЙ`} (${closed.length}):\n`;
     if (closed.length) {
       closed.forEach(t => {
         const dt = t.closedDate ? new Date(t.closedDate).toLocaleDateString("ru-RU") : "—";
@@ -386,8 +387,19 @@ const TOOL_HANDLERS = {
   },
 
   overdue_report: async (input, userId) => {
-    const { group_id } = input;
-    const filter = { "<=DEADLINE": new Date().toISOString(), "!STATUS": ["5","7"] };
+    const { group_id, days_ahead = 0 } = input;
+    const now = new Date();
+    const filter = { "!STATUS": ["5","7"] };
+
+    if (days_ahead > 0) {
+      // "Почти просрочены" — дедлайн через days_ahead дней
+      const future = new Date(now.getTime() + days_ahead * 86400000).toISOString().split("T")[0];
+      filter[">=DEADLINE"] = now.toISOString().split("T")[0];
+      filter["<=DEADLINE"] = future;
+    } else {
+      // Уже просрочены — дедлайн в прошлом
+      filter["<=DEADLINE"] = now.toISOString();
+    }
     if (group_id) filter.GROUP_ID = group_id;
 
     const result = await bx("tasks.task.list", {
@@ -397,7 +409,8 @@ const TOOL_HANDLERS = {
     }, userId);
 
     const tasks = result.tasks || [];
-    if (!tasks.length) return "✅ Просроченных задач нет!";
+    const label = days_ahead > 0 ? `ПОЧТИ ПРОСРОЧЕНЫ (дедлайн через ${days_ahead} дн.)` : "ПРОСРОЧЕННЫЕ ЗАДАЧИ";
+    if (!tasks.length) return days_ahead > 0 ? `✅ Задач с дедлайном через ${days_ahead} дней нет!` : "✅ Просроченных задач нет!";
 
     const byUser = {};
     tasks.forEach(t => {
@@ -406,12 +419,17 @@ const TOOL_HANDLERS = {
       byUser[uid].push(t);
     });
 
-    let text = `🚨 ПРОСРОЧЕННЫЕ ЗАДАЧИ — всего: ${tasks.length}\n${"═".repeat(40)}\n\n`;
+    let text = `🚨 ${label} — всего: ${tasks.length}\n${"═".repeat(40)}\n\n`;
     for (const [uid, list] of Object.entries(byUser)) {
       text += `👤 Ответственный ID:${uid} (${list.length} задач)\n`;
       list.forEach(t => {
-        const days = Math.floor((Date.now() - new Date(t.deadline)) / 86400000);
-        text += `  [${t.id}] ${t.title} · просрочено на ${days} дн. | ${taskLink(t.id, t.groupId)}\n`;
+        const deadline = new Date(t.deadline);
+        const diffDays = Math.round((deadline - now) / 86400000);
+        const timeLabel = diffDays < 0
+          ? `просрочено на ${Math.abs(diffDays)} дн.`
+          : diffDays === 0 ? "сегодня!"
+          : `через ${diffDays} дн.`;
+        text += `  [${t.id}] ${t.title} · ${timeLabel} (${deadline.toLocaleDateString("ru-RU")}) | ${taskLink(t.id, t.groupId)}\n`;
       });
       text += "\n";
     }
@@ -635,7 +653,7 @@ const ANTHROPIC_TOOLS = [
       type: "object",
       properties: {
         group_id:  { type: "number" },
-        days_back: { type: "number", description: "За сколько дней смотреть закрытые (по умолчанию 7)" },
+        days_back: { type: "number", description: "За сколько дней смотреть закрытые (по умолчанию 7, 0 = за всё время)" },
       },
       required: ["group_id"],
     },
@@ -669,10 +687,13 @@ const ANTHROPIC_TOOLS = [
   },
   {
     name: "overdue_report",
-    description: "Показать все просроченные задачи по всем сотрудникам с ID исполнителей.",
+    description: "Показать просроченные задачи (days_ahead=0) или почти просрочены (days_ahead=1-7).",
     input_schema: {
       type: "object",
-      properties: { group_id: { type: "number", description: "Опционально — фильтр по проекту" } },
+      properties: {
+        group_id:   { type: "number", description: "Опционально — фильтр по проекту" },
+        days_ahead: { type: "number", description: "0 = уже просрочены (по умолчанию); 1-7 = дедлайн через N дней (почти просрочены)" },
+      },
     },
   },
   {
@@ -1022,9 +1043,13 @@ server.tool("get_project_summary",
   "Полная сводка по проекту — открытые задачи, недавно закрытые, статус. Для запросов типа 'расскажи про проект редстаф'.",
   {
     group_id:  z.number().describe("ID проекта (получи через find_project)"),
-    days_back: z.number().optional().describe("За сколько дней смотреть закрытые задачи (по умолчанию 7)"),
+    days_back: z.number().optional().describe("За сколько дней смотреть закрытые задачи (по умолчанию 7, 0 = за всё время)"),
   },
   async ({ group_id, days_back = 7 }) => {
+    const closedFilter = { GROUP_ID: group_id, STATUS: "5" };
+    if (days_back > 0) {
+      closedFilter[">=CLOSED_DATE"] = new Date(Date.now() - days_back * 86400000).toISOString().split("T")[0];
+    }
     const [openResult, closedResult] = await Promise.all([
       bx("tasks.task.list", {
         filter: { GROUP_ID: group_id, "!STATUS": ["5","7"] },  // всё кроме Завершена и Отклонена
@@ -1032,11 +1057,7 @@ server.tool("get_project_summary",
         order: { PRIORITY: "DESC", DEADLINE: "ASC" },
       }),
       bx("tasks.task.list", {
-        filter: {
-          GROUP_ID: group_id,
-          STATUS: "5",  // только реально завершённые
-          ">=CLOSED_DATE": new Date(Date.now() - days_back * 86400000).toISOString().split("T")[0],
-        },
+        filter: closedFilter,
         select: ["ID","TITLE","RESPONSIBLE_ID","CLOSED_DATE"],
         order: { CLOSED_DATE: "DESC" },
       }),
@@ -1073,7 +1094,7 @@ server.tool("get_project_summary",
       });
     } else { text += "  Нет открытых задач\n"; }
 
-    text += `\n✅ ЗАКРЫТО ЗА ${days_back} ДНЕЙ (${closed.length}):\n`;
+    text += `\n✅ ${days_back === 0 ? 'ВСЕ ЗАКРЫТЫЕ' : `ЗАКРЫТО ЗА ${days_back} ДНЕЙ`} (${closed.length}):\n`;
     if (closed.length) {
       closed.forEach(t => {
         const dt = t.closedDate ? new Date(t.closedDate).toLocaleDateString("ru-RU") : "—";
@@ -1140,9 +1161,21 @@ server.tool("add_checklist_item",
 // ── 15. Отчёт по просроченным задачам ─────────────────────────────────────
 server.tool("overdue_report",
   "Показать все просроченные задачи по всем сотрудникам — кто что не сделал вовремя.",
-  { group_id: z.number().optional().describe("ID проекта для фильтра") },
-  async ({ group_id }) => {
-    const filter = { "<=DEADLINE": new Date().toISOString(), "!STATUS": ["5","7"] };
+  {
+    group_id:   z.number().optional().describe("ID проекта для фильтра"),
+    days_ahead: z.number().optional().describe("0 = просрочены; 1-7 = почти просрочены через N дней"),
+  },
+  async ({ group_id, days_ahead = 0 }) => {
+    const now = new Date();
+    const filter = { "!STATUS": ["5","7"] };
+
+    if (days_ahead > 0) {
+      const future = new Date(now.getTime() + days_ahead * 86400000).toISOString().split("T")[0];
+      filter[">=DEADLINE"] = now.toISOString().split("T")[0];
+      filter["<=DEADLINE"] = future;
+    } else {
+      filter["<=DEADLINE"] = now.toISOString();
+    }
     if (group_id) filter.GROUP_ID = group_id;
 
     const result = await bx("tasks.task.list", {
@@ -1152,7 +1185,8 @@ server.tool("overdue_report",
     });
 
     const tasks = result.tasks || [];
-    if (!tasks.length) return { content: [{ type: "text", text: "✅ Просроченных задач нет!" }] };
+    const label = days_ahead > 0 ? `ПОЧТИ ПРОСРОЧЕНЫ (через ${days_ahead} дн.)` : "ПРОСРОЧЕННЫЕ ЗАДАЧИ";
+    if (!tasks.length) return { content: [{ type: "text", text: `✅ Задач нет!` }] };
 
     const byUser = {};
     tasks.forEach(t => {
@@ -1161,12 +1195,14 @@ server.tool("overdue_report",
       byUser[uid].push(t);
     });
 
-    let text = `🚨 ПРОСРОЧЕННЫЕ ЗАДАЧИ — всего: ${tasks.length}\n${"═".repeat(40)}\n\n`;
+    let text = `🚨 ${label} — всего: ${tasks.length}\n${"═".repeat(40)}\n\n`;
     for (const [uid, list] of Object.entries(byUser)) {
       text += `👤 Ответственный ID:${uid} (${list.length} задач)\n`;
       list.forEach(t => {
-        const days = Math.floor((Date.now() - new Date(t.deadline)) / 86400000);
-        text += `  [${t.id}] ${t.title} · просрочено на ${days} дн.\n`;
+        const deadline = new Date(t.deadline);
+        const diffDays = Math.round((deadline - now) / 86400000);
+        const timeLabel = diffDays < 0 ? `просрочено на ${Math.abs(diffDays)} дн.` : diffDays === 0 ? "сегодня!" : `через ${diffDays} дн.`;
+        text += `  [${t.id}] ${t.title} · ${timeLabel} (${deadline.toLocaleDateString("ru-RU")})\n`;
       });
       text += "\n";
     }
@@ -1313,10 +1349,22 @@ ${Object.entries(PROJECTS).map(([key, p]) => `- ${key} → ${p.id} (${p.name})`)
 Если пользователь упоминает проект по любому из этих названий — используй соответствующий group_id
 в вызовах инструментов (list_tasks, get_project_summary, overdue_report, workload_report и т.д.).
 
-Если пользователь просит "мои задачи" — используй его ID (указан выше) как responsible_id в employee_tasks.
-Для завершённых задач с фильтром по дате используй date_from и date_to (YYYY-MM-DD).
-Для завершённых в конкретном проекте используй group_id вместе со status="done".
-НЕ ПРИДУМЫВАЙ статистику по датам — если данных нет, скажи честно и используй правильные параметры.
+ПРАВИЛА ВЫБОРА ИНСТРУМЕНТА — строго соблюдай:
+
+"мои задачи" / "мои активные" / "что у меня" → employee_tasks(responsible_id=USER_ID)
+"мои завершённые за [период]" → employee_tasks(responsible_id=USER_ID, status="done", date_from=..., date_to=...)
+"мои завершённые в [проекте]" → employee_tasks(responsible_id=USER_ID, status="done", group_id=...)
+
+"задачи в проекте X" / "что в [проекте]" (без "мои") → get_project_summary(group_id=X)
+"все завершённые в проекте X" (без "мои") → get_project_summary(group_id=X, days_back=0)
+"активные в проекте X" → list_tasks(group_id=X, status="all") с фильтром "!STATUS"=["5","7"]
+"сколько задач в проекте X" → get_project_summary(group_id=X)
+
+"просрочены" → overdue_report(group_id=X если указан проект)
+"почти просрочены" / "горят" / "через 3 дня" → overdue_report(days_ahead=3, group_id=X)
+
+НЕ ИСПОЛЬЗУЙ employee_tasks когда пользователь спрашивает про проект в целом (без "мои").
+НЕ ПРИДУМЫВАЙ статистику, цифры или разбивку по датам если нет реальных данных из API.
 
 Для создания задач используй create_task. Если не хватает данных (например неясен исполнитель) —
 сначала вызови find_user чтобы найти ID, или уточни у пользователя.
