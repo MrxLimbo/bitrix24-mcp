@@ -1314,13 +1314,11 @@ ${"═".repeat(40)}
       text += `👤 ${name} ${bar} ${data.total} задач`;
       if (data.overdue) text += ` | ⚠️ просрочено: ${data.overdue}`;
       if (data.high)    text += ` | 🔴 высокий: ${data.high}`;
-      text += "
-";
+      text += "\n";
     });
 
     return { content: [{ type: "text", text }] };
   }
-);
 );
 
 // ── 17. Читать переписку в коллабе ────────────────────────────────────────
