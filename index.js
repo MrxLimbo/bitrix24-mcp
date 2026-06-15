@@ -25,6 +25,53 @@ async function bx(method, params = {}, userId = null) {
   return data.result;
 }
 
+// ── Пагинация: получить ВСЕ задачи по фильтру (не только первые 50) ─────────
+async function getAllTasks(filter, select, order, userId) {
+  let all = [], start = 0, page = 0;
+  const MAX_PAGES = 20; // защита от бесконечного цикла (макс 1000 задач)
+  while (page < MAX_PAGES) {
+    const res = await bx("tasks.task.list", { filter, select, order, start }, userId);
+    const batch = res?.tasks || [];
+    all = all.concat(batch);
+    if (batch.length < 50) break; // последняя страница
+    start += 50;
+    page++;
+  }
+  return all;
+}
+
+// ── Точный счётчик задач без загрузки данных ─────────────────────────────────
+async function countTasks(filter, userId) {
+  const res = await bx("tasks.task.list", {
+    filter,
+    select: ["ID"],
+    start: 0,
+  }, userId);
+  // Получаем реальное количество через пагинацию
+  let total = res?.tasks?.length || 0;
+  let start = 50;
+  while (res?.tasks?.length === 50) {
+    const next = await bx("tasks.task.list", { filter, select: ["ID"], start }, userId);
+    total += next?.tasks?.length || 0;
+    if ((next?.tasks?.length || 0) < 50) break;
+    start += 50;
+    if (start > 1000) break; // защита
+  }
+  return total;
+}
+
+// ── Resolve userId → имя сотрудника ─────────────────────────────────────────
+async function getUserName(userId) {
+  if (!userId || userId === "?") return `ID:${userId}`;
+  try {
+    const profile = await getUserProfile(userId);
+    if (profile?.name) {
+      return `${profile.name}${profile.lastName ? " " + profile.lastName : ""}`;
+    }
+  } catch (e) { /* fallback */ }
+  return `ID:${userId}`;
+}
+
 const PROJECTS = {
   "redpay":            { id: 80,  name: "RedPay" },
   "redmarket":         { id: 328, name: "RedMarket" },
@@ -82,7 +129,9 @@ const TOOL_HANDLERS = {
 
   create_task: async (input, userId) => {
     const { title, description, responsible_id, deadline, priority, checklist, group_id } = input;
-    const fields = { TITLE: title, GROUP_ID: group_id || 290 };
+    // group_id обязателен — не ставим дефолтный чтобы задача не попадала в чужой проект
+    const fields = { TITLE: title };
+    if (group_id) fields.GROUP_ID = group_id;
     if (description)    fields.DESCRIPTION   = description;
     if (responsible_id) fields.RESPONSIBLE_ID = responsible_id;
     if (deadline)       fields.DEADLINE       = deadline + "T23:59:00+06:00";
@@ -107,13 +156,12 @@ const TOOL_HANDLERS = {
     const filter = {};
     if (group_id) filter.GROUP_ID = group_id;
 
-    const result = await bx("tasks.task.list", {
+    const tasks = await getAllTasks(
       filter,
-      select: ["ID","TITLE","STATUS","PRIORITY","RESPONSIBLE_ID","DEADLINE","GROUP_ID","CREATED_BY"],
-      order: { PRIORITY: "DESC", DEADLINE: "ASC" },
-    }, userId);
-
-    const tasks = result.tasks || [];
+      ["ID","TITLE","STATUS","PRIORITY","RESPONSIBLE_ID","DEADLINE","GROUP_ID","CREATED_BY"],
+      { PRIORITY: "DESC", DEADLINE: "ASC" },
+      userId
+    );
     if (!tasks.length) return "Задач нет";
 
     const now = new Date();
@@ -143,8 +191,11 @@ const TOOL_HANDLERS = {
   },
 
   employee_tasks: async (input, userId) => {
-    const { responsible_id, status, group_id, date_from, date_to } = input;
-    const filter = { RESPONSIBLE_ID: responsible_id };
+    const { responsible_id, status, group_id, date_from, date_to, created_by } = input;
+    const filter = {};
+    // Фильтр по исполнителю ИЛИ постановщику
+    if (responsible_id) filter.RESPONSIBLE_ID = responsible_id;
+    if (created_by)     filter.CREATED_BY = created_by;
     if (status === "active") filter["!STATUS"] = ["5","7"];
     if (status === "done") {
       filter.STATUS = "5";
@@ -153,24 +204,23 @@ const TOOL_HANDLERS = {
     }
     if (group_id) filter.GROUP_ID = group_id;
 
-    const select = ["ID","TITLE","STATUS","PRIORITY","DEADLINE","GROUP_ID"];
+    const select = ["ID","TITLE","STATUS","PRIORITY","DEADLINE","GROUP_ID","RESPONSIBLE_ID"];
     if (status === "done") select.push("CLOSED_DATE");
 
-    const result = await bx("tasks.task.list", {
-      filter,
-      select,
-      order: status === "done" ? { CLOSED_DATE: "DESC" } : { ACTIVITY_DATE: "DESC" },
-    }, userId);
-
-    const tasks = result.tasks || [];
+    // Пагинация — получаем все задачи, не только первые 50
+    const tasks = await getAllTasks(filter, select,
+      status === "done" ? { CLOSED_DATE: "DESC" } : { ACTIVITY_DATE: "DESC" },
+      userId
+    );
     if (!tasks.length) return "Задач нет";
 
     const now = new Date();
+    const who = created_by ? `постановщик ID:${created_by}` : `исполнитель ID:${responsible_id}`;
     const projectInfo = group_id ? ` | проект ID:${group_id}` : "";
     const dateInfo = (date_from || date_to)
       ? ` | с ${date_from || "начала"} по ${date_to || "сегодня"}`
       : "";
-    let text = `👤 Задачи ID:${responsible_id}${projectInfo}${dateInfo} — всего: ${tasks.length}\n\n`;
+    let text = `👤 Задачи (${who})${projectInfo}${dateInfo} — всего: ${tasks.length}\n\n`;
 
     const groups = {};
     tasks.forEach(t => {
@@ -298,25 +348,25 @@ const TOOL_HANDLERS = {
   get_project_summary: async (input, userId) => {
     const { group_id, days_back = 7 } = input;
     const closedFilter = { GROUP_ID: group_id, STATUS: "5" };
-    // days_back=0 означает "за всё время" — без ограничения по дате
     if (days_back > 0) {
       closedFilter[">=CLOSED_DATE"] = new Date(Date.now() - days_back * 86400000).toISOString().split("T")[0];
     }
-    const [openResult, closedResult] = await Promise.all([
-      bx("tasks.task.list", {
-        filter: { GROUP_ID: group_id, "!STATUS": ["5","7"] },
-        select: ["ID","TITLE","STATUS","PRIORITY","RESPONSIBLE_ID","DEADLINE"],
-        order: { PRIORITY: "DESC", DEADLINE: "ASC" },
-      }, userId),
-      bx("tasks.task.list", {
-        filter: closedFilter,
-        select: ["ID","TITLE","RESPONSIBLE_ID","CLOSED_DATE"],
-        order: { CLOSED_DATE: "DESC" },
-      }, userId),
-    ]);
 
-    const open   = openResult.tasks   || [];
-    const closed = closedResult.tasks || [];
+    // Пагинация для обоих запросов — реальные данные без усечения
+    const [open, closed] = await Promise.all([
+      getAllTasks(
+        { GROUP_ID: group_id, "!STATUS": ["5","7"] },
+        ["ID","TITLE","STATUS","PRIORITY","RESPONSIBLE_ID","DEADLINE"],
+        { PRIORITY: "DESC", DEADLINE: "ASC" },
+        userId
+      ),
+      getAllTasks(
+        closedFilter,
+        ["ID","TITLE","RESPONSIBLE_ID","CLOSED_DATE"],
+        { CLOSED_DATE: "DESC" },
+        userId
+      ),
+    ]);
     const now    = new Date();
 
     const overdue = open.filter(t => t.deadline && new Date(t.deadline) < now);
@@ -441,32 +491,41 @@ const TOOL_HANDLERS = {
     const filter = { "!STATUS": ["5","7"] };
     if (group_id) filter.GROUP_ID = group_id;
 
-    const result = await bx("tasks.task.list", {
+    // Пагинация — получаем все активные задачи
+    const tasks = await getAllTasks(
       filter,
-      select: ["ID","TITLE","STATUS","PRIORITY","RESPONSIBLE_ID","DEADLINE"],
-      order: { ACTIVITY_DATE: "DESC" },
-    }, userId);
+      ["ID","TITLE","STATUS","PRIORITY","RESPONSIBLE_ID","DEADLINE"],
+      { ACTIVITY_DATE: "DESC" },
+      userId
+    );
 
-    const tasks  = result.tasks || [];
     const now    = new Date();
     const byUser = {};
 
     tasks.forEach(t => {
       const uid = t.responsibleId || "?";
-      if (!byUser[uid]) byUser[uid] = { total: 0, high: 0, overdue: 0 };
+      if (!byUser[uid]) byUser[uid] = { total: 0, high: 0, overdue: 0, tasks: [] };
       byUser[uid].total++;
+      byUser[uid].tasks.push(t.id);
       if (t.priority === "2") byUser[uid].high++;
       if (t.deadline && new Date(t.deadline) < now) byUser[uid].overdue++;
     });
 
     const sorted = Object.entries(byUser).sort((a, b) => b[1].total - a[1].total);
 
+    // Получаем имена всех ответственных
+    const nameMap = {};
+    await Promise.all(sorted.map(async ([uid]) => {
+      nameMap[uid] = await getUserName(uid);
+    }));
+
     let text = `📊 ЗАГРУЗКА СОТРУДНИКОВ — активных задач: ${tasks.length}\n${"═".repeat(40)}\n\n`;
     sorted.forEach(([uid, data]) => {
+      const name = nameMap[uid] || `ID:${uid}`;
       const bar = "█".repeat(Math.min(data.total, 10));
-      text += `👤 ID:${uid} ${bar} ${data.total} задач`;
+      text += `👤 ${name} ${bar} ${data.total} задач`;
       if (data.overdue) text += ` | ⚠️ просрочено: ${data.overdue}`;
-      if (data.high)    text += ` | 🔴 высокий приоритет: ${data.high}`;
+      if (data.high)    text += ` | 🔴 высокий: ${data.high}`;
       text += "\n";
     });
     return text;
@@ -564,13 +623,13 @@ const ANTHROPIC_TOOLS = [
     input_schema: {
       type: "object",
       properties: {
-        responsible_id: { type: "number", description: "ID сотрудника" },
+        responsible_id: { type: "number", description: "ID исполнителя задачи" },
+        created_by:     { type: "number", description: "ID постановщика — для запроса 'задачи где я постановщик'" },
         status:         { type: "string", enum: ["all","active","done"] },
         group_id:       { type: "number", description: "Фильтр по проекту (group_id)" },
-        date_from:      { type: "string", description: "Дата от YYYY-MM-DD — для фильтра завершённых по дате закрытия" },
-        date_to:        { type: "string", description: "Дата до YYYY-MM-DD — для фильтра завершённых по дате закрытия" },
+        date_from:      { type: "string", description: "Дата от YYYY-MM-DD — для фильтра завершённых" },
+        date_to:        { type: "string", description: "Дата до YYYY-MM-DD — для фильтра завершённых" },
       },
-      required: ["responsible_id"],
     },
   },
   {
@@ -752,7 +811,8 @@ server.tool("create_task",
     group_id:       z.number().optional().describe("ID проекта/группы"),
   },
   async ({ title, description, responsible_id, deadline, priority, checklist, group_id }) => {
-    const fields = { TITLE: title, GROUP_ID: group_id || 290 };
+    const fields = { TITLE: title };
+    if (group_id) fields.GROUP_ID = group_id;
     if (description)    fields.DESCRIPTION   = description;
     if (responsible_id) fields.RESPONSIBLE_ID = responsible_id;
     if (deadline)       fields.DEADLINE       = deadline + "T23:59:00+06:00";
@@ -829,13 +889,14 @@ server.tool("manager_dashboard",
 server.tool("employee_tasks",
   "Показать все задачи конкретного сотрудника — что в работе, что просрочено, загрузка.",
   {
-    responsible_id: z.number().describe("ID сотрудника в Bitrix24"),
+    responsible_id: z.number().optional().describe("ID исполнителя задачи"),
+    created_by:     z.number().optional().describe("ID постановщика — задачи где этот человек создатель"),
     status:    z.enum(["all","active","done"]).optional().describe("all/active/done"),
     group_id:  z.number().optional().describe("Фильтр по проекту (group_id)"),
-    date_from: z.string().optional().describe("Дата от YYYY-MM-DD — для завершённых по дате закрытия"),
-    date_to:   z.string().optional().describe("Дата до YYYY-MM-DD — для завершённых по дате закрытия"),
+    date_from: z.string().optional().describe("Дата от YYYY-MM-DD — для завершённых"),
+    date_to:   z.string().optional().describe("Дата до YYYY-MM-DD — для завершённых"),
   },
-  async ({ responsible_id, status, group_id, date_from, date_to }) => {
+  async ({ responsible_id, created_by, status, group_id, date_from, date_to }) => {
     const filter = { RESPONSIBLE_ID: responsible_id };
     if (status === "active") filter["!STATUS"] = ["5","7"];
     if (status === "done") {
@@ -1219,38 +1280,47 @@ server.tool("workload_report",
     const filter = { "!STATUS": ["5","7"] };
     if (group_id) filter.GROUP_ID = group_id;
 
-    const result = await bx("tasks.task.list", {
+    const tasks = await getAllTasks(
       filter,
-      select: ["ID","TITLE","STATUS","PRIORITY","RESPONSIBLE_ID","DEADLINE"],
-      order: { ACTIVITY_DATE: "DESC" },
-    });
+      ["ID","TITLE","STATUS","PRIORITY","RESPONSIBLE_ID","DEADLINE"],
+      { ACTIVITY_DATE: "DESC" }
+    );
 
-    const tasks  = result.tasks || [];
     const now    = new Date();
     const byUser = {};
 
     tasks.forEach(t => {
       const uid = t.responsibleId || "?";
-      if (!byUser[uid]) byUser[uid] = { total: 0, high: 0, overdue: 0, tasks: [] };
+      if (!byUser[uid]) byUser[uid] = { total: 0, high: 0, overdue: 0 };
       byUser[uid].total++;
       if (t.priority === "2") byUser[uid].high++;
       if (t.deadline && new Date(t.deadline) < now) byUser[uid].overdue++;
-      byUser[uid].tasks.push(t);
     });
 
     const sorted = Object.entries(byUser).sort((a, b) => b[1].total - a[1].total);
 
-    let text = `📊 ЗАГРУЗКА СОТРУДНИКОВ — активных задач: ${tasks.length}\n${"═".repeat(40)}\n\n`;
+    const nameMap = {};
+    await Promise.all(sorted.map(async ([uid]) => {
+      nameMap[uid] = await getUserName(uid);
+    }));
+
+    let text = `📊 ЗАГРУЗКА СОТРУДНИКОВ — активных задач: ${tasks.length}
+${"═".repeat(40)}
+
+`;
     sorted.forEach(([uid, data]) => {
+      const name = nameMap[uid] || `ID:${uid}`;
       const bar = "█".repeat(Math.min(data.total, 10));
-      text += `👤 ID:${uid} ${bar} ${data.total} задач`;
+      text += `👤 ${name} ${bar} ${data.total} задач`;
       if (data.overdue) text += ` | ⚠️ просрочено: ${data.overdue}`;
-      if (data.high)    text += ` | 🔴 высокий приоритет: ${data.high}`;
-      text += "\n";
+      if (data.high)    text += ` | 🔴 высокий: ${data.high}`;
+      text += "
+";
     });
 
     return { content: [{ type: "text", text }] };
   }
+);
 );
 
 // ── 17. Читать переписку в коллабе ────────────────────────────────────────
@@ -1366,6 +1436,14 @@ ${Object.entries(PROJECTS).map(([key, p]) => `- ${key} → ${p.id} (${p.name})`)
 НЕ ИСПОЛЬЗУЙ employee_tasks когда пользователь спрашивает про проект в целом (без "мои").
 НЕ ПРИДУМЫВАЙ статистику, цифры или разбивку по датам если нет реальных данных из API.
 
+КРИТИЧНО — ПРАВИЛА ЧЕСТНОСТИ:
+- Показывай ТОЛЬКО задачи из ответа API. Никогда не придумывай названия задач.
+- Реальное количество = tasks.length из пагинации. Не доверяй полю total из API.
+- Если задач больше 50 и нет фильтра по дате/исполнителю — скажи сколько нашёл и предложи уточнить.
+- Нельзя: "за май+июнь — 33 задачи" если "за июнь — 40 задач". Проверяй логику чисел.
+- Если не можешь получить имя сотрудника — так и скажи, не угадывай.
+- Для "задачи где я постановщик" используй employee_tasks с параметром created_by (не responsible_id).
+
 Для создания задач используй create_task. Если не хватает данных (например неясен исполнитель) —
 сначала вызови find_user чтобы найти ID, или уточни у пользователя.
 
@@ -1374,11 +1452,14 @@ ${Object.entries(PROJECTS).map(([key, p]) => `- ${key} → ${p.id} (${p.name})`)
 СТАТУСЫ задач Bitrix24 (коды из API — подтверждены живыми тестами):
 2 = 📋 Ждёт выполнения  — назначена, кнопка «Начать» не нажата
 3 = 🔄 Выполняется      — исполнитель нажал «Начать», работа идёт
-4 = 👀 Ждёт контроля   — В ДАННОМ ПОРТАЛЕ НЕ ИСПОЛЬЗУЕТСЯ. «Завершить» всегда даёт статус 5 напрямую.
-5 = ✅ Завершена         — закрыта (кнопка «Возобновить»)
+4 = 👀 Ждёт контроля   — исполнитель нажал «Завершить», задача отправлена на проверку постановщику.
+    Постановщик видит «Принять» → статус 5, или «Вернуть в работу» → статус 3.
+    Статус 4 появляется ТОЛЬКО если: постановщик ≠ исполнитель И постановщик не нажимал «Начать» И не стал наблюдателем.
+    Если эти условия нарушены — «Завершить» даёт статус 5 напрямую.
+5 = ✅ Завершена         — постановщик принял работу, задача закрыта (кнопка «Возобновить»)
 6 = ⏸️ Отложена          — «Отложить»/«Приостановить» → статус 6; «Возобновить» → статус 3
 7 = ❌ Отклонена
-Активные задачи = статусы 2, 3, 6. Завершённые = статус 5.
+Активные задачи = статусы 2, 3, 4, 6. Завершённые = статус 5.
 «Возобновить» из ЛЮБОГО статуса (5 или 6) → всегда возвращает к статусу 3 «Выполняется».
 
 УДАЛЕНИЕ ЗАДАЧ: Bitrix24 удаляет задачи без возможности восстановления.
