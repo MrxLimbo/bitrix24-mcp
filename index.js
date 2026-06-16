@@ -120,6 +120,48 @@ const STATUS = {
 
 const PRIORITY = { "0": "низкий", "1": "средний", "2": "🔴 высокий" };
 
+// Максимум задач в списке — больше = только сводка, без перечисления
+const MAX_DISPLAY = 20;
+
+function formatDate(dateStr) {
+  if (!dateStr) return "";
+  try { return new Date(dateStr).toLocaleDateString("ru-RU", { day:"2-digit", month:"2-digit" }); }
+  catch { return ""; }
+}
+
+// Форматируем одну задачу в жёсткую строку — трудно перефразировать
+function fmtTask(t, groupId) {
+  const status  = STATUS[t.status] || `статус:${t.status}`;
+  const dl      = t.deadline ? ` · до ${formatDate(t.deadline)}` : "";
+  const closed  = t.closedDate ? ` · закрыта ${formatDate(t.closedDate)}` : "";
+  const overdue = t.deadline && new Date(t.deadline) < new Date() && t.status !== "5" ? " ⚠️" : "";
+  const link    = taskLink(t.id, groupId || t.groupId);
+  return `[${t.id}] ${t.title} · ${status}${dl}${closed}${overdue} | ${link}`;
+}
+
+// Сводка когда задач > MAX_DISPLAY — только числа, никакого списка
+function taskSummary(tasks, hint = "") {
+  const byStatus = {};
+  tasks.forEach(t => {
+    const s = STATUS[t.status] || `статус ${t.status}`;
+    byStatus[s] = (byStatus[s] || 0) + 1;
+  });
+  let text = `📊 Найдено ${tasks.length} задач:
+`;
+  for (const [s, count] of Object.entries(byStatus)) {
+    text += `  ${s}: ${count}
+`;
+  }
+  text += `
+Для списка уточни:
+• статус (активные/завершённые)
+• период (date_from/date_to)
+• проект`;
+  if (hint) text += `
+${hint}`;
+  return text;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // TOOL HANDLERS — общая логика для MCP и для бота (function calling)
 // userId передаётся для использования личного вебхука (USER_WEBHOOKS)
@@ -229,14 +271,14 @@ const TOOL_HANDLERS = {
       groups[s].push(t);
     });
 
+    // Лимит: если задач больше MAX_DISPLAY — только сводка, без списка
+    if (tasks.length > MAX_DISPLAY) {
+      return taskSummary(tasks);
+    }
+
     for (const [status, list] of Object.entries(groups)) {
       text += `${status} (${list.length})\n`;
-      list.forEach(t => {
-        const dl = t.deadline ? ` · до ${new Date(t.deadline).toLocaleDateString("ru-RU")}` : "";
-        const closed = t.closedDate ? ` · закрыта ${new Date(t.closedDate).toLocaleDateString("ru-RU")}` : "";
-        const overdue = t.deadline && new Date(t.deadline) < now && t.status !== "5" ? " ⚠️" : "";
-        text += `  [${t.id}] ${t.title}${dl}${closed}${overdue} | ${taskLink(t.id, t.groupId)}\n`;
-      });
+      list.forEach(t => { text += `  ${fmtTask(t)}\n`; });
       text += "\n";
     }
     return text;
@@ -259,12 +301,8 @@ const TOOL_HANDLERS = {
     const tasks = result.tasks || [];
     if (!tasks.length) return "Задач нет";
 
-    const lines = tasks.map(t => {
-      const pr = t.priority === "2" ? " 🔴" : "";
-      const dl = t.deadline ? ` · до ${new Date(t.deadline).toLocaleDateString("ru-RU")}` : "";
-      return `[${t.id}] ${t.title}${pr}\n  ${STATUS[t.status] || t.status}${dl} | ${taskLink(t.id, t.groupId)}`;
-    }).join("\n\n");
-
+    if (tasks.length > MAX_DISPLAY) return taskSummary(tasks);
+    const lines = tasks.map(t => `  ${fmtTask(t)}`).join("\n");
     return `Задачи (${tasks.length}):\n\n${lines}`;
   },
 
@@ -395,13 +433,23 @@ const TOOL_HANDLERS = {
       });
     } else { text += "  Нет открытых задач\n"; }
 
-    text += `\n✅ ${days_back === 0 ? "ВСЕ ЗАКРЫТЫЕ" : `ЗАКРЫТО ЗА ${days_back} ДНЕЙ`} (${closed.length}):\n`;
-    if (closed.length) {
-      closed.forEach(t => {
-        const dt = t.closedDate ? new Date(t.closedDate).toLocaleDateString("ru-RU") : "—";
-        text += `  [${t.id}] ${t.title} · закрыта ${dt}\n`;
+    const closedLabel = days_back === 0 ? "ВСЕ ЗАКРЫТЫЕ" : `ЗАКРЫТО ЗА ${days_back} ДНЕЙ`;
+    text += `\n✅ ${closedLabel} (${closed.length}):\n`;
+    if (!closed.length) {
+      text += "  Нет закрытых задач за период\n";
+    } else if (closed.length > MAX_DISPLAY) {
+      text += `  Показываю первые ${MAX_DISPLAY} из ${closed.length}:\n`;
+      closed.slice(0, MAX_DISPLAY).forEach(t => {
+        const dt = t.closedDate ? formatDate(t.closedDate) : "—";
+        text += `  [${t.id}] ${t.title} · закрыта ${dt} | ${taskLink(t.id, group_id)}\n`;
       });
-    } else { text += "  Нет закрытых задач за период\n"; }
+      text += `  ...ещё ${closed.length - MAX_DISPLAY} задач. Уточни period (date_from/date_to).\n`;
+    } else {
+      closed.forEach(t => {
+        const dt = t.closedDate ? formatDate(t.closedDate) : "—";
+        text += `  [${t.id}] ${t.title} · закрыта ${dt} | ${taskLink(t.id, group_id)}\n`;
+      });
+    }
 
     return text;
   },
@@ -1434,13 +1482,16 @@ ${Object.entries(PROJECTS).map(([key, p]) => `- ${key} → ${p.id} (${p.name})`)
 НЕ ИСПОЛЬЗУЙ employee_tasks когда пользователь спрашивает про проект в целом (без "мои").
 НЕ ПРИДУМЫВАЙ статистику, цифры или разбивку по датам если нет реальных данных из API.
 
-КРИТИЧНО — ПРАВИЛА ЧЕСТНОСТИ:
-- Показывай ТОЛЬКО задачи из ответа API. Никогда не придумывай названия задач.
-- Реальное количество = tasks.length из пагинации. Не доверяй полю total из API.
-- Если задач больше 50 и нет фильтра по дате/исполнителю — скажи сколько нашёл и предложи уточнить.
-- Нельзя: "за май+июнь — 33 задачи" если "за июнь — 40 задач". Проверяй логику чисел.
-- Если не можешь получить имя сотрудника — так и скажи, не угадывай.
-- Для "задачи где я постановщик" используй employee_tasks с параметром created_by (не responsible_id).
+КРИТИЧНО — ПРАВИЛА ЧЕСТНОСТИ (нарушение = дезинформация):
+- ЗАПРЕЩЕНО придумывать, перефразировать или переименовывать названия задач.
+- Копируй строки задач из инструмента ДОСЛОВНО: [ID] Название · Статус · Дедлайн | Ссылка
+- Если инструмент вернул сводку (📊 Найдено N задач) — выводи её без изменений.
+- Реальное количество = tasks.length из пагинации. Не используй поле total из API.
+- Нельзя показывать задачу если её нет в ответе инструмента.
+- Нельзя: "за май+июнь — 33 задачи" если "за июнь — 40 задач". Логику проверяй.
+- Если не можешь получить имя сотрудника — пиши ID, не угадывай имя.
+- Для "задачи где я постановщик" используй employee_tasks с параметром created_by.
+- Если пользователь даёт ссылку вида /user/265/ — используй ID=265 напрямую в инструментах.
 
 Для создания задач используй create_task. Если не хватает данных (например неясен исполнитель) —
 сначала вызови find_user чтобы найти ID, или уточни у пользователя.
