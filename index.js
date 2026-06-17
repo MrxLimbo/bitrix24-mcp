@@ -121,7 +121,7 @@ const STATUS = {
 const PRIORITY = { "0": "низкий", "1": "средний", "2": "🔴 высокий" };
 
 // Максимум задач в списке — больше = только сводка, без перечисления
-const MAX_DISPLAY = 20;
+const MAX_DISPLAY = 50;
 
 function formatDate(dateStr) {
   if (!dateStr) return "";
@@ -129,37 +129,84 @@ function formatDate(dateStr) {
   catch { return ""; }
 }
 
-// Форматируем одну задачу в жёсткую строку — трудно перефразировать
+// Форматируем одну задачу — жёсткая строка, Haiku копирует дословно
 function fmtTask(t, groupId) {
   const status  = STATUS[t.status] || `статус:${t.status}`;
   const dl      = t.deadline ? ` · до ${formatDate(t.deadline)}` : "";
   const closed  = t.closedDate ? ` · закрыта ${formatDate(t.closedDate)}` : "";
-  const overdue = t.deadline && new Date(t.deadline) < new Date() && t.status !== "5" ? " ⚠️" : "";
+  const now     = new Date();
+  const daysLate = t.deadline && new Date(t.deadline) < now && t.status !== "5"
+    ? Math.floor((now - new Date(t.deadline)) / 86400000) : 0;
+  const overdue = daysLate > 0 ? ` ⚠️просрочено ${daysLate}д` : "";
   const link    = taskLink(t.id, groupId || t.groupId);
   return `[${t.id}] ${t.title} · ${status}${dl}${closed}${overdue} | ${link}`;
 }
 
-// Сводка когда задач > MAX_DISPLAY — только числа, никакого списка
-function taskSummary(tasks, hint = "") {
+// Умная сводка — топ-3 срочных + статусы + проекты
+function taskSummary(tasks) {
+  const now = new Date();
+  // Топ-3 срочных активных
+  const urgent = tasks
+    .filter(t => t.deadline && t.status !== "5" && t.status !== "7")
+    .sort((a, b) => new Date(a.deadline) - new Date(b.deadline))
+    .slice(0, 3);
+  // По статусам
   const byStatus = {};
   tasks.forEach(t => {
     const s = STATUS[t.status] || `статус ${t.status}`;
     byStatus[s] = (byStatus[s] || 0) + 1;
   });
-  let text = `📊 Найдено ${tasks.length} задач:
+  // По проектам топ-5
+  const byProj = {};
+  tasks.forEach(t => {
+    const name = t.groupId && PROJECTS[t.groupId]
+      ? (PROJECTS[t.groupId].name || `проект ${t.groupId}`)
+      : t.groupId ? `группа ${t.groupId}` : "личные";
+    byProj[name] = (byProj[name] || 0) + 1;
+  });
+  const topProj = Object.entries(byProj).sort((a,b) => b[1]-a[1]).slice(0, 5);
+
+  let text = `📊 Найдено ${tasks.length} задач — много для одного списка.
 `;
-  for (const [s, count] of Object.entries(byStatus)) {
-    text += `  ${s}: ${count}
+  if (urgent.length) {
+    text += `
+🔥 Самые срочные:
+`;
+    urgent.forEach(t => {
+      const diff = Math.ceil((new Date(t.deadline) - now) / 86400000);
+      const when = diff < 0 ? `просрочено ${Math.abs(diff)}д` : diff === 0 ? "СЕГОДНЯ!" : `через ${diff}д`;
+      text += `  [${t.id}] ${t.title} · ${when} | ${taskLink(t.id, t.groupId)}
+`;
+    });
+  }
+  text += `
+По статусу:
+`;
+  for (const [s, n] of Object.entries(byStatus)) text += `  ${s}: ${n}
+`;
+  if (topProj.length > 1) {
+    text += `
+По проектам:
+`;
+    for (const [p, n] of topProj) text += `  ${p}: ${n}
 `;
   }
   text += `
-Для списка уточни:
-• статус (активные/завершённые)
-• период (date_from/date_to)
-• проект`;
-  if (hint) text += `
-${hint}`;
+Скажи статус или проект — покажу список.`;
   return text;
+}
+
+// Список задач до 50 — в code block чтобы Haiku копировал дословно
+function fmtTaskList(tasks, title = "") {
+  if (!tasks.length) return "Задач нет";
+  if (tasks.length > MAX_DISPLAY) return taskSummary(tasks);
+  const lines = tasks.map(t => fmtTask(t)).join("
+");
+  const header = title || `Задачи (${tasks.length})`;
+  return `${header}:
+\`\`\`
+${lines}
+\`\`\``;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -271,15 +318,13 @@ const TOOL_HANDLERS = {
       groups[s].push(t);
     });
 
-    // Лимит: если задач больше MAX_DISPLAY — только сводка, без списка
-    if (tasks.length > MAX_DISPLAY) {
-      return taskSummary(tasks);
-    }
+    if (tasks.length > MAX_DISPLAY) return text + taskSummary(tasks);
 
-    for (const [status, list] of Object.entries(groups)) {
-      text += `${status} (${list.length})\n`;
-      list.forEach(t => { text += `  ${fmtTask(t)}\n`; });
-      text += "\n";
+    // До 50 задач — полный список в code block
+    for (const [st, list] of Object.entries(groups)) {
+      text += `\n${st} (${list.length}):\n\\`\\`\\`\n`;
+      list.forEach(t => { text += `${fmtTask(t)}\n`; });
+      text += `\\`\\`\\`\n`;
     }
     return text;
   },
@@ -302,8 +347,8 @@ const TOOL_HANDLERS = {
     if (!tasks.length) return "Задач нет";
 
     if (tasks.length > MAX_DISPLAY) return taskSummary(tasks);
-    const lines = tasks.map(t => `  ${fmtTask(t)}`).join("\n");
-    return `Задачи (${tasks.length}):\n\n${lines}`;
+    const lines = tasks.map(t => fmtTask(t)).join("\n");
+    return `Задачи (${tasks.length}):\n\\`\\`\\`\n${lines}\n\\`\\`\\``;
   },
 
   get_task: async (input, userId) => {
@@ -443,7 +488,7 @@ const TOOL_HANDLERS = {
         const dt = t.closedDate ? formatDate(t.closedDate) : "—";
         text += `  [${t.id}] ${t.title} · закрыта ${dt} | ${taskLink(t.id, group_id)}\n`;
       });
-      text += `  ...ещё ${closed.length - MAX_DISPLAY} задач. Уточни period (date_from/date_to).\n`;
+      text += `  ...ещё ${closed.length - MAX_DISPLAY} задач. Скажи период (например "за май") — покажу все.\n`;
     } else {
       closed.forEach(t => {
         const dt = t.closedDate ? formatDate(t.closedDate) : "—";
@@ -980,17 +1025,14 @@ server.tool("employee_tasks",
       groups[s].push(t);
     });
 
-    for (const [status, list] of Object.entries(groups)) {
-      text += `${status} (${list.length})\n`;
-      list.forEach(t => {
-        const dl = t.deadline ? ` · до ${new Date(t.deadline).toLocaleDateString("ru-RU")}` : "";
-        const closed = t.closedDate ? ` · закрыта ${new Date(t.closedDate).toLocaleDateString("ru-RU")}` : "";
-        const overdue = t.deadline && new Date(t.deadline) < now && t.status !== "5" ? " ⚠️" : "";
-        text += `  [${t.id}] ${t.title}${dl}${closed}${overdue}\n`;
-      });
-      text += "\n";
+    if (tasks.length > MAX_DISPLAY) {
+      return { content: [{ type: "text", text: text + taskSummary(tasks) }] };
     }
-
+    for (const [st, list] of Object.entries(groups)) {
+      text += `\n${st} (${list.length}):\n\`\`\`\n`;
+      list.forEach(t => { text += `${fmtTask(t)}\n`; });
+      text += `\`\`\`\n`;
+    }
     return { content: [{ type: "text", text }] };
   }
 );
@@ -1465,6 +1507,14 @@ ${Object.entries(PROJECTS).map(([key, p]) => `- ${key} → ${p.id} (${p.name})`)
 Если пользователь упоминает проект по любому из этих названий — используй соответствующий group_id
 в вызовах инструментов (list_tasks, get_project_summary, overdue_report, workload_report и т.д.).
 
+ПАМЯТЬ ДИАЛОГА: Если в этом диалоге уже нашёл ID сотрудника — используй его без повторного поиска.
+Если пользователь пишет "его задачи", "её задачи", "там" — подразумевается последний упомянутый человек/проект.
+
+ДАТЫ НА РУССКОМ: Автоматически конвертируй в YYYY-MM-DD:
+"сегодня" → текущая дата, "вчера" → -1 день, "эта неделя" → пн-вс текущей недели,
+"прошлый месяц" → 1-е ... последнее число прошлого месяца, "май" → 2026-05-01/2026-05-31,
+"июнь" → 2026-06-01/2026-06-30, "апрель" → 2026-04-01/2026-04-30.
+
 ПРАВИЛА ВЫБОРА ИНСТРУМЕНТА — строго соблюдай:
 
 "мои задачи" / "мои активные" / "что у меня" → employee_tasks(responsible_id=USER_ID)
@@ -1580,11 +1630,27 @@ app.post("/bot", express.urlencoded({ extended: true }), express.json(), async (
 
   const dialogId = params.DIALOG_ID || data.DIALOG_ID;
   const userId   = params.FROM_USER_ID || params.USER_ID || data.USER_ID;
-  const message  = params.MESSAGE || data.MESSAGE;
+  const rawMessage = params.MESSAGE || data.MESSAGE || "";
+
+  // Убираем упоминание бота из текста если есть
+  const message = rawMessage.replace(/\[USER=\d+\][^\[]*\[\/USER\]/gi, "").trim();
 
   console.log(`💬 Message from ${userId}: "${message}" | botId:${botId} dialogId:${dialogId}`);
 
   if (!message || !dialogId || !botId) return;
+
+  // Умная обработка групповых чатов: отвечаем без тега если это команда/вопрос
+  const isPrivate  = String(dialogId).startsWith("U");
+  const isGroupChat = String(dialogId).startsWith("chat");
+  const isMentioned = rawMessage !== message; // был тег
+  const isCommand  = /^(покажи|найди|сколько|кто|что|дай|создай|обнови|где|список|задачи|загрузка|просроченные|активные|завершённые|завершенные|отчёт|отчет|помоги|покажи|статус)/i.test(message);
+  const isQuestion = message.includes("?");
+
+  // В групповом чате — отвечаем только если: тег ИЛИ команда ИЛИ вопрос
+  if (isGroupChat && !isMentioned && !isCommand && !isQuestion) {
+    console.log("⏭️ Group message without command — skipping");
+    return;
+  }
 
   // Команда сброса памяти
   if (message.trim().toLowerCase() === "забудь всё" || message.trim().toLowerCase() === "забудь") {
