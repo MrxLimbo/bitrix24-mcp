@@ -200,8 +200,7 @@ function taskSummary(tasks) {
 function fmtTaskList(tasks, title = "") {
   if (!tasks.length) return "Задач нет";
   if (tasks.length > MAX_DISPLAY) return taskSummary(tasks);
-  const lines = tasks.map(t => fmtTask(t)).join("
-");
+  const lines = tasks.map(t => fmtTask(t)).join("\n");
   const header = title || `Задачи (${tasks.length})`;
   return `${header}:
 \`\`\`
