@@ -201,11 +201,8 @@ function fmtTaskList(tasks, title = "") {
   if (!tasks.length) return "Задач нет";
   if (tasks.length > MAX_DISPLAY) return taskSummary(tasks);
   const lines = tasks.map(t => fmtTask(t)).join("\n");
-  const header = title || `Задачи (${tasks.length})`;
-  return `${header}:
-\`\`\`
-${lines}
-\`\`\``;
+  const header = title || ("Задачи (" + tasks.length + ")");
+  return header + ":\n" + lines;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -319,11 +316,9 @@ const TOOL_HANDLERS = {
 
     if (tasks.length > MAX_DISPLAY) return text + taskSummary(tasks);
 
-    // До 50 задач — полный список в code block
     for (const [st, list] of Object.entries(groups)) {
-      text += `\n${st} (${list.length}):\n\\`\\`\\`\n`;
-      list.forEach(t => { text += `${fmtTask(t)}\n`; });
-      text += `\\`\\`\\`\n`;
+      text += "\n" + st + " (" + list.length + "):\n";
+      list.forEach(t => { text += fmtTask(t) + "\n"; });
     }
     return text;
   },
@@ -347,7 +342,7 @@ const TOOL_HANDLERS = {
 
     if (tasks.length > MAX_DISPLAY) return taskSummary(tasks);
     const lines = tasks.map(t => fmtTask(t)).join("\n");
-    return `Задачи (${tasks.length}):\n\\`\\`\\`\n${lines}\n\\`\\`\\``;
+    return "Задачи (" + tasks.length + "):\n" + lines;
   },
 
   get_task: async (input, userId) => {
@@ -1028,9 +1023,9 @@ server.tool("employee_tasks",
       return { content: [{ type: "text", text: text + taskSummary(tasks) }] };
     }
     for (const [st, list] of Object.entries(groups)) {
-      text += `\n${st} (${list.length}):\n\`\`\`\n`;
+      text += `\n${st} (${list.length}):\n`;
       list.forEach(t => { text += `${fmtTask(t)}\n`; });
-      text += `\`\`\`\n`;
+      
     }
     return { content: [{ type: "text", text }] };
   }
