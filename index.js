@@ -60,9 +60,11 @@ async function countTasks(filter, userId) {
   return total;
 }
 
-// ── Resolve userId → имя сотрудника ─────────────────────────────────────────
+// ── Resolve userId → имя сотрудника (сначала KNOWN_USERS, потом API) ─────────
 async function getUserName(userId) {
   if (!userId || userId === "?") return `ID:${userId}`;
+  const known = KNOWN_USERS[String(userId)];
+  if (known) return known.name + " " + known.last;
   try {
     const profile = await getUserProfile(userId);
     if (profile?.name) {
@@ -71,6 +73,27 @@ async function getUserName(userId) {
   } catch (e) { /* fallback */ }
   return `ID:${userId}`;
 }
+
+// ── Полный список сотрудников ОЦП (подтверждённые ID) ────────────────────────
+const KNOWN_USERS = {
+  "4":    { name:"Жалынбек",  last:"Адишев",        pos:"Проектный менеджер",   dept:"ОЦП" },
+  "256":  { name:"Эрлан",     last:"Чодоев",         pos:"Специалист по данным", dept:"ОЦП" },
+  "265":  { name:"Айтунук",   last:"Бактыбекова",    pos:"Бизнес-Аналитик IT",  dept:"ОЦП" },
+  "276":  { name:"Урмат",     last:"Сагынбек уулу",  pos:"Руководитель ОЦП",    dept:"ОЦП" },
+  "279":  { name:"Каныкей",   last:"Мамытканова",    pos:"Проектный менеджер",   dept:"ОЦП" },
+  "321":  { name:"Адиляй",    last:"Сейдакматова",   pos:"Бизнес аналитик",      dept:"ОЦП" },
+  "434":  { name:"Айжамал",   last:"Мадылбекова",    pos:"Проектный менеджер",   dept:"ОЦП" },
+  "452":  { name:"Руслана",   last:"Комарова",       pos:"Data Scientist",       dept:"ОЦП" },
+  "3046": { name:"Эрмек",     last:"Русланов",       pos:"Проект менеджер",      dept:"ОЦП" },
+  "3047": { name:"Адилет",    last:"Сманкулов",      pos:"Дата-инженер",         dept:"ОЦП" },
+  "3048": { name:"Арлен",     last:"Омурбеков",      pos:"Бизнес аналитик",      dept:"ОЦП" },
+  "3136": { name:"Баяна",     last:"Поезбекова",     pos:"Бизнес-аналитик",      dept:"ОЦП" },
+  "5006": { name:"Александр", last:"Крылов",         pos:"",                     dept:"ОЦП" },
+  "7031": { name:"Айжан",     last:"Ташкулова",      pos:"Бизнес аналитик",      dept:"ОЦП" },
+};
+
+// IDs всех сотрудников ОЦП для фильтрации
+const OCP_IDS = Object.keys(KNOWN_USERS).map(Number);
 
 const PROJECTS = {
   "redpay":            { id: 80,  name: "RedPay" },
@@ -320,7 +343,7 @@ const TOOL_HANDLERS = {
       text += "\n" + st + " (" + list.length + "):\n";
       list.forEach(t => { text += fmtTask(t) + "\n"; });
     }
-    return text;
+    return "📋ДОСЛОВНО:\n" + text;
   },
 
   list_tasks: async (input, userId) => {
@@ -342,7 +365,7 @@ const TOOL_HANDLERS = {
 
     if (tasks.length > MAX_DISPLAY) return taskSummary(tasks);
     const lines = tasks.map(t => fmtTask(t)).join("\n");
-    return "Задачи (" + tasks.length + "):\n" + lines;
+    return "📋ДОСЛОВНО:\n" + "Задачи (" + tasks.length + "):\n" + lines;
   },
 
   get_task: async (input, userId) => {
@@ -570,15 +593,14 @@ const TOOL_HANDLERS = {
       });
       text += "\n";
     }
-    return text;
+    return "📋ДОСЛОВНО:\n" + text;
   },
 
   workload_report: async (input, userId) => {
-    const { group_id } = input;
+    const { group_id, ocp_only } = input;
     const filter = { "!STATUS": ["5","7"] };
     if (group_id) filter.GROUP_ID = group_id;
 
-    // Пагинация — получаем все активные задачи
     const tasks = await getAllTasks(
       filter,
       ["ID","TITLE","STATUS","PRIORITY","RESPONSIBLE_ID","DEADLINE"],
@@ -590,32 +612,31 @@ const TOOL_HANDLERS = {
     const byUser = {};
 
     tasks.forEach(t => {
-      const uid = t.responsibleId || "?";
-      if (!byUser[uid]) byUser[uid] = { total: 0, high: 0, overdue: 0, tasks: [] };
+      const uid = String(t.responsibleId || "?");
+      // Фильтр: только ОЦП если запрошено
+      if (ocp_only && !KNOWN_USERS[uid]) return;
+      if (!byUser[uid]) byUser[uid] = { total: 0, high: 0, overdue: 0 };
       byUser[uid].total++;
-      byUser[uid].tasks.push(t.id);
       if (t.priority === "2") byUser[uid].high++;
       if (t.deadline && new Date(t.deadline) < now) byUser[uid].overdue++;
     });
 
     const sorted = Object.entries(byUser).sort((a, b) => b[1].total - a[1].total);
 
-    // Получаем имена всех ответственных
-    const nameMap = {};
-    await Promise.all(sorted.map(async ([uid]) => {
-      nameMap[uid] = await getUserName(uid);
-    }));
-
-    let text = `📊 ЗАГРУЗКА СОТРУДНИКОВ — активных задач: ${tasks.length}\n${"═".repeat(40)}\n\n`;
+    // Имена из KNOWN_USERS — не вызываем API, не галлюцинируем
+    const title = ocp_only ? "ЗАГРУЗКА ОЦП" : "ЗАГРУЗКА СОТРУДНИКОВ";
+    let text = `📊 ${title} — сотрудников: ${sorted.length}\n${"═".repeat(44)}\n\n`;
     sorted.forEach(([uid, data]) => {
-      const name = nameMap[uid] || `ID:${uid}`;
-      const bar = "█".repeat(Math.min(data.total, 10));
-      text += `👤 ${name} ${bar} ${data.total} задач`;
-      if (data.overdue) text += ` | ⚠️ просрочено: ${data.overdue}`;
-      if (data.high)    text += ` | 🔴 высокий: ${data.high}`;
+      const u = KNOWN_USERS[uid];
+      const name = u ? u.name + " " + u.last : `ID:${uid}`;
+      const pos  = u ? ` (${u.pos})` : "";
+      const bar  = "█".repeat(Math.min(data.total, 10));
+      text += `👤 ${name}${pos}: ${bar} ${data.total} задач`;
+      if (data.overdue) text += ` | ⚠️${data.overdue} просрочено`;
+      if (data.high)    text += ` | 🔴${data.high} высокий`;
       text += "\n";
     });
-    return text;
+    return "📋ДОСЛОВНО:\n" + text;
   },
 
   get_collab_chat: async (input, userId) => {
@@ -847,36 +868,8 @@ const ANTHROPIC_TOOLS = [
     description: "Загрузка каждого сотрудника — сколько задач, просрочки, приоритеты.",
     input_schema: {
       type: "object",
-      properties: { group_id: { type: "number", description: "Опционально — фильтр по проекту" } },
-    },
-  },
-  {
-    name: "get_collab_chat",
-    description: "Прочитать переписку в чате коллаба (может не работать на этой версии Bitrix24).",
-    input_schema: {
-      type: "object",
-      properties: { group_id: { type: "number" }, limit: { type: "number" } },
-      required: ["group_id"],
-    },
-  },
-  {
-    name: "delete_task",
-    description: "ПОЛНОСТЬЮ удалить задачу из Bitrix24 без возможности восстановления. Используй только если пользователь явно сказал 'удали навсегда' или 'без возврата'. В остальных случаях используй restore_task с action=archive.",
-    input_schema: {
-      type: "object",
-      properties: { task_id: { type: "number" } },
-      required: ["task_id"],
-    },
-  },
-  {
-    name: "restore_task",
-    description: "Архивировать задачу (мягкое удаление — статус 'отложена' + пометка [АРХИВ], можно восстановить) или восстановить ранее заархивированную задачу.",
-    input_schema: {
-      type: "object",
-      properties: {
-        task_id: { type: "number" },
-        action: { type: "string", enum: ["archive", "unarchive"], description: "archive - спрятать задачу (по умолчанию для 'удали'), unarchive - вернуть из архива" },
-      },
+      properties: { group_id: { type: "number", description: "ID проекта (опционально)" },
+        ocp_only: { type: "boolean", description: "true = только ОЦП" },
       required: ["task_id", "action"],
     },
   },
@@ -1525,6 +1518,18 @@ ${Object.entries(PROJECTS).map(([key, p]) => `- ${key} → ${p.id} (${p.name})`)
 
 НЕ ИСПОЛЬЗУЙ employee_tasks когда пользователь спрашивает про проект в целом (без "мои").
 НЕ ПРИДУМЫВАЙ статистику, цифры или разбивку по датам если нет реальных данных из API.
+
+КРИТИЧЕСКИ ВАЖНО — МАРКЕР ДОСЛОВНОГО ВЫВОДА:
+Если ответ инструмента начинается с "📋ДОСЛОВНО:" — выведи ВСЁ после этого маркера
+БЕЗ ЕДИНОГО ИЗМЕНЕНИЯ. Не перефразируй. Не улучшай. Не добавляй эмодзи. Просто скопируй.
+
+KNOWN_USERS — реальные сотрудники ОЦП (их ID и имена точные):
+Жалынбек Адишев=4, Эрлан Чодоев=256, Айтунук Бактыбекова=265, Урмат Сагынбек уулу=276,
+Каныкей Мамытканова=279, Адиляй Сейдакматова=321, Айжамал Мадылбекова=434,
+Руслана Комарова=452, Эрмек Русланов=3046, Адилет Сманкулов=3047,
+Арлен Омурбеков=3048, Баяна Поезбекова=3136, Александр Крылов=5006, Айжан Ташкулова=7031.
+
+Для запроса "загрузка ОЦП" или "нагрузка отдела" — используй workload_report с ocp_only=true.
 
 КРИТИЧНО — ПРАВИЛА ЧЕСТНОСТИ (нарушение = дезинформация):
 - ЗАПРЕЩЕНО придумывать, перефразировать или переименовывать названия задач.
