@@ -323,8 +323,12 @@ const TOOL_HANDLERS = {
     if (!tasks.length) return "Задач нет";
 
     const now = new Date();
-    const who = created_by ? `постановщик ID:${created_by}` : `исполнитель ID:${responsible_id}`;
-    const projectInfo = group_id ? ` | проект ID:${group_id}` : "";
+    const uid = created_by || responsible_id;
+    const knownUser = uid && KNOWN_USERS[String(uid)];
+    const userName = knownUser ? knownUser.name + " " + knownUser.last : await getUserName(uid);
+    const who = created_by ? `постановщик ${userName}` : `${userName}`;
+    const projName = group_id && PROJECTS[group_id] ? PROJECTS[group_id].name || `проект ${group_id}` : group_id ? `проект ${group_id}` : "";
+    const projectInfo = projName ? ` | ${projName}` : "";
     const dateInfo = (date_from || date_to)
       ? ` | с ${date_from || "начала"} по ${date_to || "сегодня"}`
       : "";
@@ -592,6 +596,64 @@ const TOOL_HANDLERS = {
         text += `  [${t.id}] ${t.title} · ${timeLabel} (${deadline.toLocaleDateString("ru-RU")}) | ${taskLink(t.id, t.groupId)}\n`;
       });
       text += "\n";
+    }
+    return "📋ДОСЛОВНО:\n" + text;
+  },
+
+  search_tasks: async (input, userId) => {
+    const { query, group_id, responsible_id, status } = input;
+    const filter = { "%TITLE": query };
+    if (group_id)       filter.GROUP_ID = group_id;
+    if (responsible_id) filter.RESPONSIBLE_ID = responsible_id;
+    if (status === "active") filter["!STATUS"] = ["5","7"];
+    if (status === "done")   filter.STATUS = "5";
+
+    const tasks = await getAllTasks(filter,
+      ["ID","TITLE","STATUS","PRIORITY","DEADLINE","GROUP_ID","RESPONSIBLE_ID"],
+      { ACTIVITY_DATE: "DESC" }, userId);
+
+    if (!tasks.length) return "📋ДОСЛОВНО:\nПо запросу «" + query + "» задач не найдено.";
+    if (tasks.length > MAX_DISPLAY) return "📋ДОСЛОВНО:\n" + taskSummary(tasks);
+
+    let text = "Найдено по «" + query + "» (" + tasks.length + " задач):\n";
+    tasks.forEach(t => { text += fmtTask(t) + "\n"; });
+    return "📋ДОСЛОВНО:\n" + text;
+  },
+
+  get_today_tasks: async (input, userId) => {
+    const { responsible_id } = input;
+    const today = new Date().toISOString().split("T")[0];
+    const filter = {
+      RESPONSIBLE_ID: responsible_id,
+      "!STATUS": ["5","7"],
+      "<=DEADLINE": today,
+    };
+    const tasks = await getAllTasks(filter,
+      ["ID","TITLE","STATUS","PRIORITY","DEADLINE","GROUP_ID"],
+      { DEADLINE: "ASC" }, userId);
+
+    const name = KNOWN_USERS[String(responsible_id)]
+      ? KNOWN_USERS[String(responsible_id)].name
+      : "Сотрудник";
+
+    if (!tasks.length) return "📋ДОСЛОВНО:\n" + name + " — сегодня нет просроченных или срочных задач. Всё в порядке!";
+
+    const now = new Date();
+    const overdue = tasks.filter(t => new Date(t.deadline) < now);
+    const dueToday = tasks.filter(t => {
+      const d = new Date(t.deadline);
+      return d.toDateString() === now.toDateString();
+    });
+
+    let text = "Задачи на сегодня — " + name + " (" + tasks.length + " шт):\n\n";
+    if (overdue.length) {
+      text += "ПРОСРОЧЕНО (" + overdue.length + "):\n";
+      overdue.forEach(t => { text += fmtTask(t) + "\n"; });
+      text += "\n";
+    }
+    if (dueToday.length) {
+      text += "ДЕДЛАЙН СЕГОДНЯ (" + dueToday.length + "):\n";
+      dueToday.forEach(t => { text += fmtTask(t) + "\n"; });
     }
     return "📋ДОСЛОВНО:\n" + text;
   },
@@ -872,6 +934,31 @@ const ANTHROPIC_TOOLS = [
         group_id: { type: "number", description: "ID проекта (опционально)" },
         ocp_only: { type: "boolean", description: "true = только ОЦП" },
       },
+    },
+  },
+  {
+    name: "search_tasks",
+    description: "Поиск задач по ключевому слову в названии.",
+    input_schema: {
+      type: "object",
+      properties: {
+        query:          { type: "string",  description: "Ключевое слово для поиска" },
+        group_id:       { type: "number",  description: "Опционально — проект для поиска" },
+        responsible_id: { type: "number",  description: "Опционально — фильтр по исполнителю" },
+        status:         { type: "string",  enum: ["all","active","done"], description: "Фильтр по статусу" },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "get_today_tasks",
+    description: "Задачи на сегодня — дедлайн сегодня или уже просрочено.",
+    input_schema: {
+      type: "object",
+      properties: {
+        responsible_id: { type: "number", description: "ID исполнителя" },
+      },
+      required: ["responsible_id"],
     },
   },
 ];
@@ -1382,24 +1469,47 @@ server.tool("workload_report",
       nameMap[uid] = await getUserName(uid);
     }));
 
-    let text = `📊 ЗАГРУЗКА СОТРУДНИКОВ — активных задач: ${tasks.length}
-${"═".repeat(40)}
-
-`;
+    let text = "📊 ЗАГРУЗКА СОТРУДНИКОВ — сотрудников: " + sorted.length + "\n" + "═".repeat(44) + "\n\n";
     sorted.forEach(([uid, data]) => {
-      const name = nameMap[uid] || `ID:${uid}`;
-      const bar = "█".repeat(Math.min(data.total, 10));
-      text += `👤 ${name} ${bar} ${data.total} задач`;
-      if (data.overdue) text += ` | ⚠️ просрочено: ${data.overdue}`;
-      if (data.high)    text += ` | 🔴 высокий: ${data.high}`;
+      const u = KNOWN_USERS[uid];
+      const name = u ? u.name + " " + u.last : (nameMap[uid] || `ID:${uid}`);
+      const pos  = u ? ` (${u.pos})` : "";
+      const bar  = "█".repeat(Math.min(data.total, 10));
+      text += `👤 ${name}${pos}: ${bar} ${data.total} задач`;
+      if (data.overdue) text += ` | ⚠️${data.overdue} просрочено`;
+      if (data.high)    text += ` | 🔴${data.high} высокий`;
       text += "\n";
     });
 
-    return { content: [{ type: "text", text }] };
-  }
+    return { content: [{ type: "text", text: "📋ДОСЛОВНО:\n" + text }] };
 );
 
 // ── 17. Читать переписку в коллабе ────────────────────────────────────────
+server.tool("search_tasks",
+  "Поиск задач по ключевому слову в названии.",
+  {
+    query:          z.string().describe("Ключевое слово для поиска"),
+    group_id:       z.number().optional().describe("Опционально — проект"),
+    responsible_id: z.number().optional().describe("Опционально — исполнитель"),
+    status:         z.enum(["all","active","done"]).optional().describe("Фильтр по статусу"),
+  },
+  async ({ query, group_id, responsible_id, status }) => {
+    const result = await TOOL_HANDLERS.search_tasks({ query, group_id, responsible_id, status });
+    return { content: [{ type: "text", text: String(result) }] };
+  }
+);
+
+server.tool("get_today_tasks",
+  "Задачи на сегодня — дедлайн сегодня или просрочено.",
+  {
+    responsible_id: z.number().describe("ID исполнителя"),
+  },
+  async ({ responsible_id }) => {
+    const result = await TOOL_HANDLERS.get_today_tasks({ responsible_id });
+    return { content: [{ type: "text", text: String(result) }] };
+  }
+);
+
 server.tool("get_collab_chat",
   "Прочитать последние сообщения из чата коллаба/рабочей группы в Bitrix24.",
   {
@@ -1498,10 +1608,16 @@ ${Object.entries(PROJECTS).map(([key, p]) => `- ${key} → ${p.id} (${p.name})`)
 ПАМЯТЬ ДИАЛОГА: Если в этом диалоге уже нашёл ID сотрудника — используй его без повторного поиска.
 Если пользователь пишет "его задачи", "её задачи", "там" — подразумевается последний упомянутый человек/проект.
 
-ДАТЫ НА РУССКОМ: Автоматически конвертируй в YYYY-MM-DD:
-"сегодня" → текущая дата, "вчера" → -1 день, "эта неделя" → пн-вс текущей недели,
-"прошлый месяц" → 1-е ... последнее число прошлого месяца, "май" → 2026-05-01/2026-05-31,
-"июнь" → 2026-06-01/2026-06-30, "апрель" → 2026-04-01/2026-04-30.
+ДАТЫ НА РУССКОМ — всегда конвертируй без уточнений:
+"сегодня" = текущая дата | "вчера" = -1 день | "эта неделя" = пн-вс текущей недели
+"прошлая неделя" = пн-вс прошлой недели | "этот месяц" = 1-е по сегодня текущего месяца
+"апрель" = 2026-04-01/2026-04-30 | "май" = 2026-05-01/2026-05-31
+"июнь" = 2026-06-01/2026-06-30 | "июль" = 2026-07-01/2026-07-31
+Текущий год: 2026. При любом упоминании месяца — применяй фильтр date_from+date_to СРАЗУ.
+
+ФОРМАТИРОВАНИЕ — Bitrix24 чат не рендерит markdown:
+НЕ используй **жирный**, *курсив*, ### заголовки в ответах.
+Используй только: эмодзи, дефисы, переносы строк.
 
 ПРАВИЛА ВЫБОРА ИНСТРУМЕНТА — строго соблюдай:
 
