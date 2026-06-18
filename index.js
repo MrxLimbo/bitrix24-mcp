@@ -868,9 +868,10 @@ const ANTHROPIC_TOOLS = [
     description: "Загрузка каждого сотрудника — сколько задач, просрочки, приоритеты.",
     input_schema: {
       type: "object",
-      properties: { group_id: { type: "number", description: "ID проекта (опционально)" },
+      properties: {
+        group_id: { type: "number", description: "ID проекта (опционально)" },
         ocp_only: { type: "boolean", description: "true = только ОЦП" },
-      required: ["task_id", "action"],
+      },
     },
   },
 ];
