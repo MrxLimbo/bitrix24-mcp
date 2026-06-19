@@ -95,6 +95,9 @@ const KNOWN_USERS = {
 // IDs всех сотрудников ОЦП для фильтрации
 const OCP_IDS = Object.keys(KNOWN_USERS).map(Number);
 
+// Пароль для удаления задач — меняй здесь
+const DELETE_PASSWORD = process.env.DELETE_PASSWORD || "ocp2026";
+
 const PROJECTS = {
   "redpay":            { id: 80,  name: "RedPay" },
   "redmarket":         { id: 328, name: "RedMarket" },
@@ -600,6 +603,164 @@ const TOOL_HANDLERS = {
     return "📋ДОСЛОВНО:\n" + text;
   },
 
+  // ── Удалить задачу с паролем ─────────────────────────────────────────────
+  delete_task: async (input, userId) => {
+    const { task_id, password } = input;
+    if (password !== DELETE_PASSWORD) {
+      return "📋ДОСЛОВНО:\n❌ Неверный пароль. Удаление отменено.";
+    }
+    try {
+      await bx("tasks.task.delete", { taskId: task_id }, userId);
+      return "📋ДОСЛОВНО:\n✅ Задача #" + task_id + " удалена.";
+    } catch(e) {
+      return "📋ДОСЛОВНО:\n❌ Ошибка удаления задачи #" + task_id + ": " + String(e.message || e);
+    }
+  },
+
+  // ── Завершить задачу ─────────────────────────────────────────────────────
+  complete_task: async (input, userId) => {
+    const { task_id } = input;
+    try {
+      await bx("tasks.task.complete", { taskId: task_id }, userId);
+      return "📋ДОСЛОВНО:\n✅ Задача #" + task_id + " завершена!";
+    } catch(e) {
+      return "📋ДОСЛОВНО:\n❌ Не удалось завершить задачу #" + task_id + ": " + String(e.message || e);
+    }
+  },
+
+  // ── Переназначить задачу ─────────────────────────────────────────────────
+  assign_task: async (input, userId) => {
+    const { task_id, responsible_id } = input;
+    const known = KNOWN_USERS[String(responsible_id)];
+    const name  = known ? known.name + " " + known.last : "ID:" + responsible_id;
+    try {
+      await bx("tasks.task.update", {
+        taskId: task_id,
+        fields: { RESPONSIBLE_ID: responsible_id }
+      }, userId);
+      return "📋ДОСЛОВНО:\n✅ Задача #" + task_id + " переназначена на " + name;
+    } catch(e) {
+      return "📋ДОСЛОВНО:\n❌ Ошибка переназначения: " + String(e.message || e);
+    }
+  },
+
+  // ── Создать подзадачу ─────────────────────────────────────────────────────
+  create_subtask: async (input, userId) => {
+    const { parent_id, title, responsible_id, deadline } = input;
+    const fields = {
+      TITLE:          title,
+      PARENT_ID:      parent_id,
+      RESPONSIBLE_ID: responsible_id || userId,
+    };
+    if (deadline) fields.DEADLINE = deadline;
+    const res = await bx("tasks.task.add", { fields }, userId);
+    const id = res?.task?.id || res?.id || "?";
+    const known = KNOWN_USERS[String(responsible_id)];
+    const name  = known ? known.name : "исполнитель";
+    return "📋ДОСЛОВНО:\n✅ Подзадача #" + id + " создана под задачей #" + parent_id + "\n" +
+           "Название: " + title + "\n" +
+           "Исполнитель: " + name;
+  },
+
+  // ── Личная сводка дня ─────────────────────────────────────────────────────
+  get_my_summary: async (input, userId) => {
+    const { responsible_id } = input;
+    const now    = new Date();
+    const today  = now.toISOString().split("T")[0];
+    const monday = new Date(now);
+    monday.setDate(now.getDate() - now.getDay() + 1);
+    const weekStart = monday.toISOString().split("T")[0];
+
+    const [active, doneWeek] = await Promise.all([
+      getAllTasks({ RESPONSIBLE_ID: responsible_id, "!STATUS": ["5","7"] },
+        ["ID","STATUS","PRIORITY","DEADLINE"], {}, userId),
+      getAllTasks({ RESPONSIBLE_ID: responsible_id, STATUS: "5", ">=CLOSED_DATE": weekStart },
+        ["ID","STATUS"], {}, userId),
+    ]);
+
+    const overdue   = active.filter(t => t.deadline && new Date(t.deadline) < now);
+    const dueToday  = active.filter(t => t.deadline && new Date(t.deadline).toDateString() === now.toDateString());
+    const high      = active.filter(t => t.priority === "2");
+    const known     = KNOWN_USERS[String(responsible_id)];
+    const name      = known ? known.name : "Сотрудник";
+
+    let text = "Сводка на сегодня — " + name + "\n" + "═".repeat(36) + "\n\n";
+    text += "Активных задач: " + active.length + "\n";
+    if (overdue.length)  text += "⚠️ Просрочено: " + overdue.length + "\n";
+    if (dueToday.length) text += "🔥 Дедлайн сегодня: " + dueToday.length + "\n";
+    if (high.length)     text += "🔴 Высокий приоритет: " + high.length + "\n";
+    text += "✅ Закрыто за эту неделю: " + doneWeek.length + "\n";
+    return "📋ДОСЛОВНО:\n" + text;
+  },
+
+  // ── Статистика ОЦП за период ─────────────────────────────────────────────
+  get_ocp_stats: async (input, userId) => {
+    const { date_from, date_to } = input;
+    const results = await Promise.all(OCP_IDS.map(async id => {
+      const done = await getAllTasks({
+        RESPONSIBLE_ID: id, STATUS: "5",
+        ">=CLOSED_DATE": date_from, "<=CLOSED_DATE": date_to || new Date().toISOString().split("T")[0],
+      }, ["ID"], {}, userId);
+      const known = KNOWN_USERS[String(id)];
+      return { name: known ? known.name + " " + known.last : "ID:" + id, count: done.length };
+    }));
+    results.sort((a, b) => b.count - a.count);
+
+    let text = "Статистика ОЦП " + date_from + " — " + (date_to || "сегодня") + "\n" + "═".repeat(40) + "\n\n";
+    results.forEach(r => {
+      if (r.count > 0) {
+        const bar = "█".repeat(Math.min(r.count, 10));
+        text += r.name + ": " + bar + " " + r.count + "\n";
+      }
+    });
+    const total = results.reduce((s, r) => s + r.count, 0);
+    text += "\nИтого закрыто: " + total + " задач";
+    return "📋ДОСЛОВНО:\n" + text;
+  },
+
+  // ── Еженедельный отчёт ────────────────────────────────────────────────────
+  get_weekly_report: async (input, userId) => {
+    const now     = new Date();
+    const monday  = new Date(now);
+    monday.setDate(now.getDate() - now.getDay() + 1);
+    const weekStart = monday.toISOString().split("T")[0];
+
+    const [overdueAll, doneWeekAll] = await Promise.all([
+      getAllTasks({ "!STATUS": ["5","7"], "<=DEADLINE": new Date().toISOString().split("T")[0] },
+        ["ID","RESPONSIBLE_ID","TITLE","DEADLINE","GROUP_ID"], {}, userId),
+      getAllTasks({ STATUS: "5", ">=CLOSED_DATE": weekStart },
+        ["ID","RESPONSIBLE_ID"], {}, userId),
+    ]);
+
+    // Только ОЦП
+    const ocpOverdue = overdueAll.filter(t => OCP_IDS.includes(Number(t.responsibleId)));
+    const ocpDone    = doneWeekAll.filter(t => OCP_IDS.includes(Number(t.responsibleId)));
+
+    const doneByUser = {};
+    ocpDone.forEach(t => {
+      const uid = String(t.responsibleId);
+      doneByUser[uid] = (doneByUser[uid] || 0) + 1;
+    });
+
+    let text = "Еженедельный отчёт ОЦП\n" + "═".repeat(40) + "\n\n";
+    text += "Закрыто с " + weekStart + ":\n";
+    OCP_IDS.forEach(id => {
+      const n = doneByUser[String(id)] || 0;
+      if (n > 0) {
+        const u = KNOWN_USERS[String(id)];
+        text += (u ? u.name + " " + u.last : "ID:" + id) + ": " + n + " задач\n";
+      }
+    });
+
+    if (ocpOverdue.length) {
+      text += "\nПросрочено (" + ocpOverdue.length + "):\n";
+      ocpOverdue.slice(0, 10).forEach(t => {
+        text += fmtTask(t) + "\n";
+      });
+    }
+    return "📋ДОСЛОВНО:\n" + text;
+  },
+
   search_tasks: async (input, userId) => {
     const { query, group_id, responsible_id, status } = input;
     const filter = { "%TITLE": query };
@@ -935,6 +1096,73 @@ const ANTHROPIC_TOOLS = [
         ocp_only: { type: "boolean", description: "true = только ОЦП" },
       },
     },
+  },
+  {
+    name: "delete_task",
+    description: "Удалить задачу. Требует пароль для подтверждения.",
+    input_schema: { type: "object",
+      properties: {
+        task_id:  { type: "number", description: "ID задачи" },
+        password: { type: "string", description: "Пароль подтверждения" },
+      },
+      required: ["task_id", "password"],
+    },
+  },
+  {
+    name: "complete_task",
+    description: "Завершить задачу — перевести в статус Завершена.",
+    input_schema: { type: "object",
+      properties: { task_id: { type: "number", description: "ID задачи" } },
+      required: ["task_id"],
+    },
+  },
+  {
+    name: "assign_task",
+    description: "Переназначить задачу на другого исполнителя.",
+    input_schema: { type: "object",
+      properties: {
+        task_id:        { type: "number", description: "ID задачи" },
+        responsible_id: { type: "number", description: "ID нового исполнителя" },
+      },
+      required: ["task_id", "responsible_id"],
+    },
+  },
+  {
+    name: "create_subtask",
+    description: "Создать подзадачу под существующей задачей.",
+    input_schema: { type: "object",
+      properties: {
+        parent_id:      { type: "number", description: "ID родительской задачи" },
+        title:          { type: "string", description: "Название подзадачи" },
+        responsible_id: { type: "number", description: "ID исполнителя" },
+        deadline:       { type: "string", description: "Дедлайн YYYY-MM-DD" },
+      },
+      required: ["parent_id", "title"],
+    },
+  },
+  {
+    name: "get_my_summary",
+    description: "Личная сводка дня: активные задачи, просрочки, закрытые за неделю.",
+    input_schema: { type: "object",
+      properties: { responsible_id: { type: "number", description: "ID сотрудника" } },
+      required: ["responsible_id"],
+    },
+  },
+  {
+    name: "get_ocp_stats",
+    description: "Статистика ОЦП за период — кто сколько задач закрыл.",
+    input_schema: { type: "object",
+      properties: {
+        date_from: { type: "string", description: "Дата от YYYY-MM-DD" },
+        date_to:   { type: "string", description: "Дата до YYYY-MM-DD (опционально)" },
+      },
+      required: ["date_from"],
+    },
+  },
+  {
+    name: "get_weekly_report",
+    description: "Еженедельный отчёт ОЦП — закрытые задачи и просрочки за текущую неделю.",
+    input_schema: { type: "object", properties: {} },
   },
   {
     name: "search_tasks",
@@ -1486,6 +1714,74 @@ server.tool("workload_report",
 );
 
 // ── 17. Читать переписку в коллабе ────────────────────────────────────────
+server.tool("delete_task",
+  "Удалить задачу с подтверждением паролем.",
+  { task_id: z.number(), password: z.string() },
+  async ({ task_id, password }) => {
+    const r = await TOOL_HANDLERS.delete_task({ task_id, password });
+    return { content: [{ type: "text", text: String(r) }] };
+  }
+);
+
+server.tool("complete_task",
+  "Завершить задачу.",
+  { task_id: z.number() },
+  async ({ task_id }) => {
+    const r = await TOOL_HANDLERS.complete_task({ task_id });
+    return { content: [{ type: "text", text: String(r) }] };
+  }
+);
+
+server.tool("assign_task",
+  "Переназначить задачу на другого исполнителя.",
+  { task_id: z.number(), responsible_id: z.number() },
+  async ({ task_id, responsible_id }) => {
+    const r = await TOOL_HANDLERS.assign_task({ task_id, responsible_id });
+    return { content: [{ type: "text", text: String(r) }] };
+  }
+);
+
+server.tool("create_subtask",
+  "Создать подзадачу.",
+  {
+    parent_id:      z.number(),
+    title:          z.string(),
+    responsible_id: z.number().optional(),
+    deadline:       z.string().optional(),
+  },
+  async ({ parent_id, title, responsible_id, deadline }) => {
+    const r = await TOOL_HANDLERS.create_subtask({ parent_id, title, responsible_id, deadline });
+    return { content: [{ type: "text", text: String(r) }] };
+  }
+);
+
+server.tool("get_my_summary",
+  "Личная сводка дня сотрудника.",
+  { responsible_id: z.number() },
+  async ({ responsible_id }) => {
+    const r = await TOOL_HANDLERS.get_my_summary({ responsible_id });
+    return { content: [{ type: "text", text: String(r) }] };
+  }
+);
+
+server.tool("get_ocp_stats",
+  "Статистика ОЦП за период.",
+  { date_from: z.string(), date_to: z.string().optional() },
+  async ({ date_from, date_to }) => {
+    const r = await TOOL_HANDLERS.get_ocp_stats({ date_from, date_to });
+    return { content: [{ type: "text", text: String(r) }] };
+  }
+);
+
+server.tool("get_weekly_report",
+  "Еженедельный отчёт ОЦП.",
+  {},
+  async () => {
+    const r = await TOOL_HANDLERS.get_weekly_report({});
+    return { content: [{ type: "text", text: String(r) }] };
+  }
+);
+
 server.tool("search_tasks",
   "Поиск задач по ключевому слову в названии.",
   {
@@ -1763,11 +2059,18 @@ app.post("/bot", express.urlencoded({ extended: true }), express.json(), async (
   const isCommand  = /^(покажи|найди|сколько|кто|что|дай|создай|обнови|где|список|задачи|загрузка|просроченные|активные|завершённые|завершенные|отчёт|отчет|помоги|покажи|статус)/i.test(message);
   const isQuestion = message.includes("?");
 
-  // В групповом чате — отвечаем только если: тег ИЛИ команда ИЛИ вопрос
-  if (isGroupChat && !isMentioned && !isCommand && !isQuestion) {
-    console.log("⏭️ Group message without command — skipping");
+  // Точка в начале — упрощённый вызов без @тега (. покажи мои задачи)
+  const isDotCommand = message.startsWith(". ") || message === ".";
+  const cleanMessage = isDotCommand ? message.slice(2).trim() : message;
+
+  // В групповом чате — отвечаем только если: тег ИЛИ точка ИЛИ команда ИЛИ вопрос
+  if (isGroupChat && !isMentioned && !isDotCommand && !isCommand && !isQuestion) {
+    console.log("⏭️ Group message — skipping");
     return;
   }
+
+  // Используем очищенное сообщение (без точки) для дальнейшей обработки
+  const finalMessage = isDotCommand ? cleanMessage : message;
 
   // Команда сброса памяти
   if (message.trim().toLowerCase() === "забудь всё" || message.trim().toLowerCase() === "забудь") {
@@ -1790,7 +2093,7 @@ app.post("/bot", express.urlencoded({ extended: true }), express.json(), async (
 
     // Берём историю диалога + новое сообщение
     const history = getHistory(dialogId);
-    let messages = [...history, { role: "user", content: message }];
+    let messages = [...history, { role: "user", content: finalMessage || message }];
 
     console.log("🧠 Calling Claude API with tools...");
 
