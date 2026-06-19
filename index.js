@@ -96,7 +96,7 @@ const KNOWN_USERS = {
 const OCP_IDS = Object.keys(KNOWN_USERS).map(Number);
 
 // Пароль для удаления задач — меняй здесь
-const DELETE_PASSWORD = process.env.DELETE_PASSWORD || "ocp2026";
+const DELETE_PASSWORD = process.env.DELETE_PASSWORD || "1612";
 
 const PROJECTS = {
   "redpay":            { id: 80,  name: "RedPay" },
@@ -1841,16 +1841,6 @@ server.tool("get_collab_chat",
     }).join("\n\n");
 
     return { content: [{ type: "text", text: `💬 Чат коллаба ID:${group_id} (последние ${messages.length} сообщений):\n${"─".repeat(36)}\n\n${lines}` }] };
-  }
-);
-
-// ── 18. Удалить задачу ────────────────────────────────────────────────────
-server.tool("delete_task",
-  "Удалить задачу из Bitrix24 по её ID. Внимание: действие необратимо.",
-  { task_id: z.number().describe("ID задачи для удаления") },
-  async ({ task_id }) => {
-    await bx("tasks.task.delete", { taskId: task_id });
-    return { content: [{ type: "text", text: `✅ Задача #${task_id} удалена` }] };
   }
 );
 
