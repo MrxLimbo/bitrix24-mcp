@@ -40,25 +40,7 @@ async function getAllTasks(filter, select, order, userId) {
   return all;
 }
 
-// ── Точный счётчик задач без загрузки данных ─────────────────────────────────
-async function countTasks(filter, userId) {
-  const res = await bx("tasks.task.list", {
-    filter,
-    select: ["ID"],
-    start: 0,
-  }, userId);
-  // Получаем реальное количество через пагинацию
-  let total = res?.tasks?.length || 0;
-  let start = 50;
-  while (res?.tasks?.length === 50) {
-    const next = await bx("tasks.task.list", { filter, select: ["ID"], start }, userId);
-    total += next?.tasks?.length || 0;
-    if ((next?.tasks?.length || 0) < 50) break;
-    start += 50;
-    if (start > 1000) break; // защита
-  }
-  return total;
-}
+// countTasks — удалён (мёртвый код, используется getAllTasks)
 
 // ── Resolve userId → имя сотрудника (сначала KNOWN_USERS, потом API) ─────────
 async function getUserName(userId) {
@@ -92,9 +74,9 @@ const KNOWN_USERS = {
   "7031": { name:"Айжан",     last:"Ташкулова",      pos:"Бизнес аналитик",      dept:"ОЦП" },
 };
 
+// Lookup проектов по числовому ID — должен быть ПОСЛЕ объявления PROJECTS
 // IDs всех сотрудников ОЦП для фильтрации
 const OCP_IDS = Object.keys(KNOWN_USERS).map(Number);
-
 // Пароль для удаления задач — меняй здесь
 const DELETE_PASSWORD = process.env.DELETE_PASSWORD || "1612";
 
@@ -124,6 +106,12 @@ const PROJECTS = {
   "тендер":            { id: 283, name: "Тендер" },
   "автобаза":          { id: 267, name: "Автобаза" },
 };
+
+// Lookup проектов по числовому ID (после объявления PROJECTS)
+const PROJECTS_BY_ID = {};
+Object.entries(PROJECTS).forEach(([key, val]) => {
+  if (val && val.id) PROJECTS_BY_ID[val.id] = val.name || key;
+});
 
 const BITRIX_DOMAIN = "https://crm.redpetroleum.kg";
 
@@ -186,9 +174,8 @@ function taskSummary(tasks) {
   // По проектам топ-5
   const byProj = {};
   tasks.forEach(t => {
-    const name = t.groupId && PROJECTS[t.groupId]
-      ? (PROJECTS[t.groupId].name || `проект ${t.groupId}`)
-      : t.groupId ? `группа ${t.groupId}` : "личные";
+    const name = PROJECTS_BY_ID[t.groupId]
+      || (t.groupId ? `группа ${t.groupId}` : "личные");
     byProj[name] = (byProj[name] || 0) + 1;
   });
   const topProj = Object.entries(byProj).sort((a,b) => b[1]-a[1]).slice(0, 5);
@@ -571,9 +558,9 @@ const TOOL_HANDLERS = {
 
   add_checklist_item: async (input, userId) => {
     const { task_id, item } = input;
-    await bx("tasks.task.checklist.add", {
-      taskId: task_id,
-      fields: { TITLE: item, PARENT_ID: 0, IS_COMPLETE: "N" },
+    await bx("task.checklistitem.add", {
+      TASKID: task_id,
+      fields: { TITLE: String(item) },
     }, userId);
     return `✅ Пункт добавлен в чек-лист задачи #${task_id}: "${item}"`;
   },
@@ -907,12 +894,6 @@ const TOOL_HANDLERS = {
     return `💬 Чат коллаба ID:${group_id} (последние ${messages.length} сообщений):\n${"─".repeat(36)}\n\n${lines}`;
   },
 
-  delete_task: async (input, userId) => {
-    const { task_id } = input;
-    await bx("tasks.task.delete", { taskId: task_id }, userId);
-    return `✅ Задача #${task_id} удалена навсегда (без возможности восстановления)`;
-  },
-
   restore_task: async (input, userId) => {
     const { task_id, action } = input;
 
@@ -1191,6 +1172,30 @@ const ANTHROPIC_TOOLS = [
     input_schema: { type: "object", properties: {} },
   },
   {
+    name: "restore_task",
+    description: "Мягкое удаление: архивировать задачу (статус отложена + метка [АРХИВ]) или восстановить из архива.",
+    input_schema: {
+      type: "object",
+      properties: {
+        task_id: { type: "number", description: "ID задачи" },
+        action:  { type: "string", enum: ["archive", "unarchive"], description: "archive = заархивировать, unarchive = восстановить" },
+      },
+      required: ["task_id", "action"],
+    },
+  },
+  {
+    name: "get_collab_chat",
+    description: "Прочитать последние сообщения из чата коллаба/рабочей группы.",
+    input_schema: {
+      type: "object",
+      properties: {
+        group_id: { type: "number", description: "ID коллаба" },
+        limit:    { type: "number", description: "Количество сообщений (по умолчанию 20)" },
+      },
+      required: ["group_id"],
+    },
+  },
+  {
     name: "search_tasks",
     description: "Поиск задач по ключевому слову в названии.",
     input_schema: {
@@ -1246,8 +1251,9 @@ server.tool("create_task",
 
     if (checklist?.length && taskId) {
       for (const item of checklist) {
-        await bx("tasks.task.checklist.add", {
-          taskId, fields: { TITLE: item, PARENT_ID: 0, IS_COMPLETE: "N" }
+        await bx("task.checklistitem.add", {
+          TASKID: taskId,
+          fields: { TITLE: String(item) }
         });
       }
     }
@@ -1263,48 +1269,9 @@ server.tool("manager_dashboard",
     group_id: z.number().optional().describe("ID проекта для фильтра (290 = ОЦП). Без фильтра — все проекты."),
   },
   async ({ group_id }) => {
-    const filter = {};
-    if (group_id) filter.GROUP_ID = group_id;
-
-    const result = await bx("tasks.task.list", {
-      filter,
-      select: ["ID","TITLE","STATUS","PRIORITY","RESPONSIBLE_ID","DEADLINE","GROUP_ID","CREATED_BY"],
-      order: { PRIORITY: "DESC", DEADLINE: "ASC" },
-    });
-
-    const tasks = result.tasks || [];
-    if (!tasks.length) return { content: [{ type: "text", text: "Задач нет" }] };
-
-    const now = new Date();
-    const overdue   = tasks.filter(t => t.deadline && new Date(t.deadline) < now && !["5","7"].includes(t.status));
-    const highPrio  = tasks.filter(t => t.priority === "2" && !["5","7"].includes(t.status));
-    const inProgress = tasks.filter(t => t.status === "3"); // Выполняется
-    const waiting   = tasks.filter(t => t.status === "2"); // Ждёт выполнения
-    const pendingCtrl = tasks.filter(t => t.status === "4"); // Ждёт контроля
-    const newTasks  = tasks.filter(t => t.status === "1");
-    const done      = tasks.filter(t => t.status === "5");
-
-    const fmt = (t) => {
-      const dl = t.deadline ? ` · до ${new Date(t.deadline).toLocaleDateString("ru-RU")}` : "";
-      const pr = t.priority === "2" ? " 🔴" : "";
-      return `  [${t.id}] ${t.title}${pr}${dl}`;
-    };
-
-    let text = `📊 ДАШБОРД ОЦП — всего задач: ${tasks.length}\n${"═".repeat(44)}\n\n`;
-
-    if (overdue.length) {
-      text += `🚨 ПРОСРОЧЕНО (${overdue.length}):\n${overdue.map(fmt).join("\n")}\n\n`;
-    }
-    if (highPrio.length) {
-      text += `🔴 ВЫСОКИЙ ПРИОРИТЕТ (${highPrio.length}):\n${highPrio.map(fmt).join("\n")}\n\n`;
-    }
-    text += `🔄 ВЫПОЛНЯЕТСЯ (${inProgress.length}):\n${inProgress.length ? inProgress.map(fmt).join("\n") : "  —"}\n\n`;
-    text += `📋 ЖДЁТ ВЫПОЛНЕНИЯ (${waiting.length}):\n${waiting.length ? waiting.map(fmt).join("\n") : "  —"}\n\n`;
-    text += `👀 ЖДЁТ КОНТРОЛЯ (${pendingCtrl.length}):\n${pendingCtrl.length ? pendingCtrl.map(fmt).join("\n") : "  —"}\n\n`;
-    text += `🆕 НОВЫЕ (${newTasks.length}):\n${newTasks.length ? newTasks.map(fmt).join("\n") : "  —"}\n\n`;
-    text += `✅ ЗАВЕРШЕНЫ (${done.length})\n`;
-
-    return { content: [{ type: "text", text }] };
+    // Делегируем в TOOL_HANDLERS — там пагинация и правильная логика
+    const r = await TOOL_HANDLERS.manager_dashboard({ group_id });
+    return { content: [{ type: "text", text: String(r) }] };
   }
 );
 
@@ -1320,7 +1287,9 @@ server.tool("employee_tasks",
     date_to:   z.string().optional().describe("Дата до YYYY-MM-DD — для завершённых"),
   },
   async ({ responsible_id, created_by, status, group_id, date_from, date_to }) => {
-    const filter = { RESPONSIBLE_ID: responsible_id };
+    const filter = {};
+    if (responsible_id) filter.RESPONSIBLE_ID = responsible_id;
+    if (created_by)     filter.CREATED_BY = created_by;
     if (status === "active") filter["!STATUS"] = ["5","7"];
     if (status === "done") {
       filter.STATUS = "5";
@@ -1332,13 +1301,11 @@ server.tool("employee_tasks",
     const select = ["ID","TITLE","STATUS","PRIORITY","DEADLINE","GROUP_ID"];
     if (status === "done") select.push("CLOSED_DATE");
 
-    const result = await bx("tasks.task.list", {
-      filter,
-      select,
-      order: status === "done" ? { CLOSED_DATE: "DESC" } : { ACTIVITY_DATE: "DESC" },
-    });
+    // Пагинация вместо одного запроса
+    const tasks = await getAllTasks(filter, select,
+      status === "done" ? { CLOSED_DATE: "DESC" } : { ACTIVITY_DATE: "DESC" }
+    );
 
-    const tasks = result.tasks || [];
     if (!tasks.length) return { content: [{ type: "text", text: "Задач нет" }] };
 
     const now = new Date();
@@ -1346,7 +1313,10 @@ server.tool("employee_tasks",
     const dateInfo = (date_from || date_to)
       ? ` | с ${date_from || "начала"} по ${date_to || "сегодня"}`
       : "";
-    let text = `👤 Задачи ID:${responsible_id}${projectInfo}${dateInfo} — всего: ${tasks.length}\n\n`;
+    const _uid10 = responsible_id || created_by;
+    const _known10 = _uid10 && KNOWN_USERS[String(_uid10)];
+    const _label10 = _known10 ? (_known10.name + " " + _known10.last) : (created_by ? `постановщик ID:${created_by}` : `ID:${responsible_id}`);
+    let text = `👤 Задачи ${_label10}${projectInfo}${dateInfo} — всего: ${tasks.length}\n\n`;
 
     const groups = {};
     tasks.forEach(t => {
@@ -1631,9 +1601,9 @@ server.tool("add_checklist_item",
     item:    z.string().describe("Текст пункта чек-листа"),
   },
   async ({ task_id, item }) => {
-    await bx("tasks.task.checklist.add", {
-      taskId: task_id,
-      fields: { TITLE: item, PARENT_ID: 0, IS_COMPLETE: "N" },
+    await bx("task.checklistitem.add", {
+      TASKID: task_id,
+      fields: { TITLE: String(item) },
     });
     return { content: [{ type: "text", text: `✅ Пункт добавлен в чек-лист задачи #${task_id}: "${item}"` }] };
   }
@@ -1694,49 +1664,14 @@ server.tool("overdue_report",
 
 // ── 16. Загрузка сотрудников ───────────────────────────────────────────────
 server.tool("workload_report",
-  "Показать загрузку каждого сотрудника — сколько задач у кого, кто перегружен.",
-  { group_id: z.number().optional().describe("ID проекта для фильтра") },
-  async ({ group_id }) => {
-    const filter = { "!STATUS": ["5","7"] };
-    if (group_id) filter.GROUP_ID = group_id;
-
-    const tasks = await getAllTasks(
-      filter,
-      ["ID","TITLE","STATUS","PRIORITY","RESPONSIBLE_ID","DEADLINE"],
-      { ACTIVITY_DATE: "DESC" }
-    );
-
-    const now    = new Date();
-    const byUser = {};
-
-    tasks.forEach(t => {
-      const uid = t.responsibleId || "?";
-      if (!byUser[uid]) byUser[uid] = { total: 0, high: 0, overdue: 0 };
-      byUser[uid].total++;
-      if (t.priority === "2") byUser[uid].high++;
-      if (t.deadline && new Date(t.deadline) < now) byUser[uid].overdue++;
-    });
-
-    const sorted = Object.entries(byUser).sort((a, b) => b[1].total - a[1].total);
-
-    const nameMap = {};
-    await Promise.all(sorted.map(async ([uid]) => {
-      nameMap[uid] = await getUserName(uid);
-    }));
-
-    let text = "📊 ЗАГРУЗКА СОТРУДНИКОВ — сотрудников: " + sorted.length + "\n" + "═".repeat(44) + "\n\n";
-    sorted.forEach(([uid, data]) => {
-      const u = KNOWN_USERS[uid];
-      const name = u ? u.name + " " + u.last : (nameMap[uid] || `ID:${uid}`);
-      const pos  = u ? ` (${u.pos})` : "";
-      const bar  = "█".repeat(Math.min(data.total, 10));
-      text += `👤 ${name}${pos}: ${bar} ${data.total} задач`;
-      if (data.overdue) text += ` | ⚠️${data.overdue} просрочено`;
-      if (data.high)    text += ` | 🔴${data.high} высокий`;
-      text += "\n";
-    });
-
-    return { content: [{ type: "text", text: "📋ДОСЛОВНО:\n" + text }] };
+  "Загрузка каждого сотрудника — сколько задач, просрочки, приоритеты.",
+  {
+    group_id: z.number().optional().describe("ID проекта для фильтра"),
+    ocp_only: z.boolean().optional().describe("true = только ОЦП"),
+  },
+  async ({ group_id, ocp_only }) => {
+    const r = await TOOL_HANDLERS.workload_report({ group_id, ocp_only });
+    return { content: [{ type: "text", text: String(r) }] };
   }
 );
 
