@@ -465,7 +465,7 @@ const TOOL_HANDLERS = {
   },
 
   get_project_summary: async (input, userId) => {
-    const { group_id, days_back = 7 } = input;
+    const { group_id, days_back = 0 } = input;
     const closedFilter = { GROUP_ID: group_id, STATUS: "5" };
     if (days_back > 0) {
       closedFilter[">=CLOSED_DATE"] = new Date(Date.now() - days_back * 86400000).toISOString().split("T")[0];
@@ -1494,9 +1494,9 @@ server.tool("get_project_summary",
   "Полная сводка по проекту — открытые задачи, недавно закрытые, статус. Для запросов типа 'расскажи про проект редстаф'.",
   {
     group_id:  z.number().describe("ID проекта (получи через find_project)"),
-    days_back: z.number().optional().describe("За сколько дней смотреть закрытые задачи (по умолчанию 7, 0 = за всё время)"),
+    days_back: z.number().optional().describe("За сколько дней смотреть закрытые задачи (0 = за всё время, по умолчанию)"),
   },
-  async ({ group_id, days_back = 7 }) => {
+  async ({ group_id, days_back = 0 }) => {
     const closedFilter = { GROUP_ID: group_id, STATUS: "5" };
     if (days_back > 0) {
       closedFilter[">=CLOSED_DATE"] = new Date(Date.now() - days_back * 86400000).toISOString().split("T")[0];
@@ -1815,7 +1815,7 @@ const BOT_CLIENTS = {
 
 // ── Память диалогов ─────────────────────────────────────────────────────────
 const CONVERSATION_HISTORY = new Map(); // dialogId -> [{role, content}, ...]
-const MAX_HISTORY = 10; // последние 10 сообщений (5 обменов)
+const MAX_HISTORY = 6; // последние 6 сообщений (3 обмена)
 
 function getHistory(dialogId) {
   return CONVERSATION_HISTORY.get(dialogId) || [];
@@ -1884,6 +1884,8 @@ ${Object.entries(PROJECTS).map(([key, p]) => `- ${key} → ${p.id} (${p.name})`)
 
 НЕ ИСПОЛЬЗУЙ employee_tasks когда пользователь спрашивает про проект в целом (без "мои").
 НЕ ПРИДУМЫВАЙ статистику, цифры или разбивку по датам если нет реальных данных из API.
+ЗАПРЕЩЕНО называть любое число задач без вызова инструмента.
+"за все время" / "за всё время" / "всего" = всегда days_back=0.
 
 КРИТИЧЕСКИ ВАЖНО — МАРКЕР ДОСЛОВНОГО ВЫВОДА:
 Если ответ инструмента начинается с "📋ДОСЛОВНО:" — выведи ВСЁ после этого маркера
@@ -2056,13 +2058,19 @@ app.post("/bot", express.urlencoded({ extended: true }), express.json(), async (
     console.log("🧠 Calling Claude API with tools...");
 
     let finalAnswer = "";
-    const MAX_ITERATIONS = 6;
+    const MAX_ITERATIONS = 5;
 
     for (let i = 0; i < MAX_ITERATIONS; i++) {
       const response = await anthropic.messages.create({
         model: "claude-haiku-4-5-20251001",
         max_tokens: 1500,
-        system: getBotSystem() + userInfo,
+        system: [
+          {
+            type: "text",
+            text: getBotSystem() + userInfo,
+            cache_control: { type: "ephemeral" },
+          }
+        ],
         tools: ANTHROPIC_TOOLS,
         messages,
       });
@@ -2102,8 +2110,10 @@ app.post("/bot", express.urlencoded({ extended: true }), express.json(), async (
     console.log("✅ Final answer:", answer.slice(0, 150));
 
     // Сохраняем в историю только текстовый обмен (без tool_use деталей)
+    // Обрезаем длинные ответы чтобы не тащить списки задач в следующий запрос
+    const historyAnswer = answer.length > 500 ? answer.slice(0, 500) + "...[список обрезан]" : answer;
     addToHistory(dialogId, "user", message);
-    addToHistory(dialogId, "assistant", answer);
+    addToHistory(dialogId, "assistant", historyAnswer);
 
     await bx("imbot.message.add", {
       BOT_ID:    botId,
