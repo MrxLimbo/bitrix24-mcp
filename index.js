@@ -1221,6 +1221,7 @@ const ANTHROPIC_TOOLS = [
       },
       required: ["responsible_id"],
     },
+    cache_control: { type: "ephemeral" }, // кеш всех инструментов
   },
 ];
 
@@ -2064,6 +2065,20 @@ app.post("/bot", express.urlencoded({ extended: true }), express.json(), async (
 
     console.log("🧠 Calling Claude API with tools...");
 
+    // Вычисляем системный промпт ОДИН РАЗ до цикла
+    const staticSystem = getBotSystem(); // статичная часть — общая для всех пользователей
+    const systemBlocks = [
+      {
+        type: "text",
+        text: staticSystem,
+        cache_control: { type: "ephemeral" }, // кешируется один раз для всех
+      },
+      {
+        type: "text",
+        text: userInfo, // динамичная часть — уникальна для каждого пользователя
+      }
+    ];
+
     let finalAnswer = "";
     const MAX_ITERATIONS = 5;
 
@@ -2071,13 +2086,7 @@ app.post("/bot", express.urlencoded({ extended: true }), express.json(), async (
       const response = await anthropic.messages.create({
         model: "claude-haiku-4-5-20251001",
         max_tokens: 1500,
-        system: [
-          {
-            type: "text",
-            text: getBotSystem() + userInfo,
-            cache_control: { type: "ephemeral" },
-          }
-        ],
+        system: systemBlocks,
         tools: ANTHROPIC_TOOLS,
         messages,
       });
