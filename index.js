@@ -5,6 +5,7 @@ import { z } from "zod";
 import Anthropic from "@anthropic-ai/sdk";
 
 const WEBHOOK = process.env.BITRIX_WEBHOOK_URL;
+const FIREFLIES_API_KEY = process.env.FIREFLIES_API_KEY;
 if (!WEBHOOK) { console.error("❌ Нужна BITRIX_WEBHOOK_URL"); process.exit(1); }
 
 // Личные вебхуки сотрудников — задачи будут создаваться от их имени
@@ -41,6 +42,21 @@ async function getAllTasks(filter, select, order, userId) {
 }
 
 // countTasks — удалён (мёртвый код, используется getAllTasks)
+
+// ── Fireflies GraphQL helper ─────────────────────────────────────────────────
+async function fireflies(query, variables = {}) {
+  const res = await fetch("https://api.fireflies.ai/graphql", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${FIREFLIES_API_KEY}`,
+    },
+    body: JSON.stringify({ query, variables }),
+  });
+  const data = await res.json();
+  if (data.errors) throw new Error(data.errors[0].message);
+  return data.data;
+}
 
 // ── Resolve userId → имя сотрудника (сначала KNOWN_USERS, потом API) ─────────
 async function getUserName(userId) {
@@ -1771,6 +1787,193 @@ server.tool("get_today_tasks",
     return { content: [{ type: "text", text: String(result) }] };
   }
 );
+
+// ── Fireflies MCP Tools ──────────────────────────────────────────────────────
+
+server.tool("fireflies_get_meetings",
+  "Получить список последних совещаний из Fireflies.ai с датой и названием.",
+  {
+    limit: z.number().optional().describe("Количество последних совещаний (по умолчанию 5)"),
+  },
+  async ({ limit = 5 }) => {
+    if (!FIREFLIES_API_KEY) return { content: [{ type: "text", text: "❌ FIREFLIES_API_KEY не настроен" }] };
+    const data = await fireflies(`
+      query($limit: Int) {
+        transcripts(limit: $limit) {
+          id
+          title
+          date
+          duration
+          participants
+        }
+      }
+    `, { limit });
+    const meetings = data.transcripts || [];
+    if (!meetings.length) return { content: [{ type: "text", text: "Совещаний не найдено" }] };
+    const lines = meetings.map((m, i) => {
+      const date = m.date ? new Date(m.date).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "—";
+      const dur = m.duration ? `${Math.round(m.duration / 60)} мин` : "";
+      return `${i + 1}. [${m.id}] ${m.title || "Без названия"} · ${date} ${dur}`;
+    }).join("
+");
+    return { content: [{ type: "text", text: `📅 Последние совещания:
+
+${lines}` }] };
+  }
+);
+
+server.tool("fireflies_get_summary",
+  "Получить саммари и список задач (action items) из совещания Fireflies.ai.",
+  {
+    meeting_id: z.string().optional().describe("ID совещания (если не указан — берётся последнее)"),
+  },
+  async ({ meeting_id }) => {
+    if (!FIREFLIES_API_KEY) return { content: [{ type: "text", text: "❌ FIREFLIES_API_KEY не настроен" }] };
+
+    let id = meeting_id;
+    if (!id) {
+      const list = await fireflies(`query { transcripts(limit: 1) { id title date } }`);
+      const last = list.transcripts?.[0];
+      if (!last) return { content: [{ type: "text", text: "Совещаний не найдено" }] };
+      id = last.id;
+    }
+
+    const data = await fireflies(`
+      query($id: String!) {
+        transcript(id: $id) {
+          id
+          title
+          date
+          duration
+          participants
+          summary {
+            overview
+            action_items
+            keywords
+          }
+        }
+      }
+    `, { id });
+
+    const t = data.transcript;
+    if (!t) return { content: [{ type: "text", text: "Совещание не найдено" }] };
+
+    const date = t.date ? new Date(t.date).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "—";
+    const dur = t.duration ? `${Math.round(t.duration / 60)} мин` : "";
+
+    let text = `📋 Совещание: ${t.title || "Без названия"}
+`;
+    text += `📅 Дата: ${date} ${dur}
+`;
+    text += `👥 Участники: ${(t.participants || []).join(", ") || "—"}
+
+`;
+
+    if (t.summary?.overview) text += `📝 Обзор:
+${t.summary.overview}
+
+`;
+    if (t.summary?.action_items) text += `✅ Action Items:
+${t.summary.action_items}
+
+`;
+    if (t.summary?.keywords?.length) text += `🔑 Ключевые темы: ${t.summary.keywords.join(", ")}
+`;
+
+    text += `
+🆔 ID совещания: ${t.id}`;
+
+    return { content: [{ type: "text", text }] };
+  }
+);
+
+server.tool("fireflies_create_tasks",
+  "Создать задачи в Bitrix24 на основе action items из совещания Fireflies.ai.",
+  {
+    meeting_id: z.string().optional().describe("ID совещания (если не указан — берётся последнее)"),
+    group_id: z.number().optional().describe("ID проекта в Bitrix24 (если нужно привязать к проекту)"),
+    responsible_id: z.number().optional().describe("ID исполнителя по умолчанию"),
+  },
+  async ({ meeting_id, group_id, responsible_id }) => {
+    if (!FIREFLIES_API_KEY) return { content: [{ type: "text", text: "❌ FIREFLIES_API_KEY не настроен" }] };
+
+    let id = meeting_id;
+    if (!id) {
+      const list = await fireflies(`query { transcripts(limit: 1) { id title date } }`);
+      const last = list.transcripts?.[0];
+      if (!last) return { content: [{ type: "text", text: "Совещаний не найдено" }] };
+      id = last.id;
+    }
+
+    const data = await fireflies(`
+      query($id: String!) {
+        transcript(id: $id) {
+          title
+          date
+          summary { action_items }
+        }
+      }
+    `, { id });
+
+    const t = data.transcript;
+    if (!t?.summary?.action_items) return { content: [{ type: "text", text: "Action items не найдены в этом совещании" }] };
+
+    // Разбиваем action items на строки
+    const items = t.summary.action_items
+      .split("
+")
+      .map(s => s.replace(/^[-•*\d.]+\s*/, "").trim())
+      .filter(s => s.length > 5);
+
+    if (!items.length) return { content: [{ type: "text", text: "Не удалось распарсить action items" }] };
+
+    const meetingTitle = t.title || "Совещание";
+    const date = t.date ? new Date(t.date).toLocaleDateString("ru-RU") : "";
+
+    const created = [];
+    const errors = [];
+
+    for (const item of items) {
+      try {
+        const params = {
+          fields: {
+            TITLE: item,
+            DESCRIPTION: `Задача из совещания: ${meetingTitle} (${date})`,
+            RESPONSIBLE_ID: responsible_id || 3046,
+          }
+        };
+        if (group_id) params.fields.GROUP_ID = group_id;
+
+        const result = await bx("tasks.task.add", params);
+        const taskId = result?.task?.id || result?.id;
+        if (taskId) {
+          created.push(`✅ [${taskId}] ${item}`);
+        } else {
+          errors.push(`❌ ${item}`);
+        }
+      } catch (e) {
+        errors.push(`❌ ${item}: ${e.message}`);
+      }
+    }
+
+    let text = `📋 Совещание: ${meetingTitle}
+`;
+    text += `🆕 Создано задач: ${created.length} из ${items.length}
+
+`;
+    if (created.length) text += created.join("
+") + "
+";
+    if (errors.length) text += "
+Ошибки:
+" + errors.join("
+");
+
+    return { content: [{ type: "text", text }] };
+  }
+);
+
+// ── Bitrix24 get_collab_chat ──────────────────────────────────────────────────
 
 server.tool("get_collab_chat",
   "Прочитать последние сообщения из чата коллаба/рабочей группы в Bitrix24.",
