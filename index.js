@@ -1814,11 +1814,8 @@ server.tool("fireflies_get_meetings",
       const date = m.date ? new Date(m.date).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "—";
       const dur = m.duration ? `${Math.round(m.duration / 60)} мин` : "";
       return `${i + 1}. [${m.id}] ${m.title || "Без названия"} · ${date} ${dur}`;
-    }).join("
-");
-    return { content: [{ type: "text", text: `📅 Последние совещания:
-
-${lines}` }] };
+    }).join("\n");
+    return { content: [{ type: "text", text: `📅 Последние совещания:\n\n${lines}` }] };
   }
 );
 
@@ -1861,27 +1858,13 @@ server.tool("fireflies_get_summary",
     const date = t.date ? new Date(t.date).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "—";
     const dur = t.duration ? `${Math.round(t.duration / 60)} мин` : "";
 
-    let text = `📋 Совещание: ${t.title || "Без названия"}
-`;
-    text += `📅 Дата: ${date} ${dur}
-`;
-    text += `👥 Участники: ${(t.participants || []).join(", ") || "—"}
-
-`;
-
-    if (t.summary?.overview) text += `📝 Обзор:
-${t.summary.overview}
-
-`;
-    if (t.summary?.action_items) text += `✅ Action Items:
-${t.summary.action_items}
-
-`;
-    if (t.summary?.keywords?.length) text += `🔑 Ключевые темы: ${t.summary.keywords.join(", ")}
-`;
-
-    text += `
-🆔 ID совещания: ${t.id}`;
+    let text = `📋 Совещание: ${t.title || "Без названия"}\n`;
+    text += `📅 Дата: ${date} ${dur}\n`;
+    text += `👥 Участники: ${(t.participants || []).join(", ") || "—"}\n\n`;
+    if (t.summary?.overview) text += `📝 Обзор:\n${t.summary.overview}\n\n`;
+    if (t.summary?.action_items) text += `✅ Action Items:\n${t.summary.action_items}\n\n`;
+    if (t.summary?.keywords?.length) text += `🔑 Ключевые темы: ${t.summary.keywords.join(", ")}\n`;
+    text += `\n🆔 ID совещания: ${t.id}`;
 
     return { content: [{ type: "text", text }] };
   }
@@ -1918,10 +1901,8 @@ server.tool("fireflies_create_tasks",
     const t = data.transcript;
     if (!t?.summary?.action_items) return { content: [{ type: "text", text: "Action items не найдены в этом совещании" }] };
 
-    // Разбиваем action items на строки
     const items = t.summary.action_items
-      .split("
-")
+      .split("\n")
       .map(s => s.replace(/^[-•*\d.]+\s*/, "").trim())
       .filter(s => s.length > 5);
 
@@ -1929,7 +1910,6 @@ server.tool("fireflies_create_tasks",
 
     const meetingTitle = t.title || "Совещание";
     const date = t.date ? new Date(t.date).toLocaleDateString("ru-RU") : "";
-
     const created = [];
     const errors = [];
 
@@ -1943,7 +1923,6 @@ server.tool("fireflies_create_tasks",
           }
         };
         if (group_id) params.fields.GROUP_ID = group_id;
-
         const result = await bx("tasks.task.add", params);
         const taskId = result?.task?.id || result?.id;
         if (taskId) {
@@ -1956,18 +1935,10 @@ server.tool("fireflies_create_tasks",
       }
     }
 
-    let text = `📋 Совещание: ${meetingTitle}
-`;
-    text += `🆕 Создано задач: ${created.length} из ${items.length}
-
-`;
-    if (created.length) text += created.join("
-") + "
-";
-    if (errors.length) text += "
-Ошибки:
-" + errors.join("
-");
+    let text = `📋 Совещание: ${meetingTitle}\n`;
+    text += `🆕 Создано задач: ${created.length} из ${items.length}\n\n`;
+    if (created.length) text += created.join("\n") + "\n";
+    if (errors.length) text += "\nОшибки:\n" + errors.join("\n");
 
     return { content: [{ type: "text", text }] };
   }
