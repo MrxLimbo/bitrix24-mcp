@@ -3,6 +3,7 @@ import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import express from "express";
 import { z } from "zod";
 import Anthropic from "@anthropic-ai/sdk";
+import { AsyncLocalStorage } from "async_hooks";
 
 const WEBHOOK = process.env.BITRIX_WEBHOOK_URL;
 const FIREFLIES_API_KEY = process.env.FIREFLIES_API_KEY;
@@ -13,7 +14,26 @@ const USER_WEBHOOKS = {
   "3046": "https://crm.redpetroleum.kg/rest/3046/em7h2nchgw8zgnr4/", // Эрмек Русланов
 };
 
+// ── "Личность бота": per-event OAuth-токен из data.BOT[botId].access_token ──
+// AsyncLocalStorage (не глобальная переменная!) — чтобы параллельные события
+// от разных диалогов не путали токены друг друга между собой.
+const botTokenStorage = new AsyncLocalStorage();
+
 async function bx(method, params = {}, userId = null) {
+  const botToken = botTokenStorage.getStore();
+
+  if (botToken) {
+    // Вызов от имени самого бота (OAuth-токен приложения на этот диалог)
+    const res = await fetch(`https://crm.redpetroleum.kg/rest/${method}.json`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...params, auth: botToken }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error_description || data.error);
+    return data.result;
+  }
+
   const webhook = (userId && USER_WEBHOOKS[String(userId)]) || WEBHOOK;
   const base = webhook.endsWith("/") ? webhook : webhook + "/";
   const res = await fetch(`${base}${method}.json`, {
@@ -2227,15 +2247,20 @@ app.post("/bot", express.urlencoded({ extended: true }), express.json(), async (
   const data     = body.data || body.DATA || {};
   const params   = data.PARAMS || data;
 
-  // BOT = { "7358": { BOT_ID: "7358", BOT_CODE: "..." } }
+  // BOT = { "7358": { BOT_ID: "7358", BOT_CODE: "...", AUTH_TOKEN: {...} } }
   const botRaw   = data.BOT;
-  let botId;
+  let botId, botAccessToken;
   if (typeof botRaw === "object" && botRaw !== null) {
     const firstBot = Object.values(botRaw)[0];
     botId = firstBot?.BOT_ID || Object.keys(botRaw)[0];
+    // Bitrix может присылать токен по-разному в зависимости от версии события —
+    // проверяем оба известных варианта поля.
+    botAccessToken = firstBot?.access_token || firstBot?.AUTH_TOKEN?.access_token || null;
   } else {
     botId = botRaw || data.BOT_ID || params.TO_USER_ID;
   }
+  if (botAccessToken) console.log("🔑 Bot access_token найден в событии");
+  else console.log("⚠️ Bot access_token отсутствует в событии — используем вебхук как fallback");
 
   const dialogId = params.DIALOG_ID || data.DIALOG_ID;
   const userId   = params.FROM_USER_ID || params.USER_ID || data.USER_ID;
@@ -2337,7 +2362,9 @@ app.post("/bot", express.urlencoded({ extended: true }), express.json(), async (
         let resultText;
         try {
           const handler = TOOL_HANDLERS[tu.name];
-          resultText = handler ? await handler(tu.input, userId) : `Инструмент ${tu.name} не найден`;
+          resultText = handler
+            ? await botTokenStorage.run(botAccessToken, () => handler(tu.input, userId))
+            : `Инструмент ${tu.name} не найден`;
         } catch (e) {
           console.error(`Tool error (${tu.name}):`, e.message);
           resultText = `Ошибка при вызове ${tu.name}: ${e.message}`;
