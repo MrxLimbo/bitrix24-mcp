@@ -552,7 +552,6 @@ const TOOL_HANDLERS = {
 
     return `Дерево всех отделов компании:\n\n${lines.join("\n")}`;
   },
-  },
 
   find_project: async (input) => {
     const { name } = input;
