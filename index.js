@@ -2345,5 +2345,9 @@ app.get("/health", (_, res) =>
   res.json({ status: "ok", service: "bitrix24-ocp-mcp", version: "6.2", tools: 19, bot: true, function_calling: true, memory: true, profiles: true, personal_webhooks: true })
 );
 
+// ── OAuth stub для локального приложения Bitrix24 (временно, для теста im.dialog.messages.get) ─────
+app.get("/bitrix/handler", (req, res) => res.status(200).send("OK"));
+app.get("/bitrix/install", (req, res) => res.status(200).send("OK"));
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Bitrix24 OCP MCP v3.0 | 16 tools | port ${PORT}`));
