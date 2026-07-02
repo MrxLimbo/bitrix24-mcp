@@ -522,6 +522,38 @@ const TOOL_HANDLERS = {
       userList.map(u => `ID:${u.ID} | ${u.NAME} ${u.LAST_NAME}${u.WORK_POSITION ? ` | ${u.WORK_POSITION}` : ""}`).join("\n");
   },
 
+  // Полное дерево всех отделов компании — строим по PARENT, как папки с отступами
+  list_departments: async (input, userId) => {
+    const depts = await bx("department.get", {}, userId);
+    const deptList = Array.isArray(depts) ? depts : [];
+    if (!deptList.length) return "Отделы не найдены";
+
+    const byParent = {};
+    deptList.forEach(d => {
+      const parent = d.PARENT || "0";
+      if (!byParent[parent]) byParent[parent] = [];
+      byParent[parent].push(d);
+    });
+    // Сортировка внутри уровня по SORT (как в Bitrix)
+    Object.values(byParent).forEach(arr => arr.sort((a, b) => (a.SORT || 0) - (b.SORT || 0)));
+
+    const lines = [];
+    function walk(parentId, depth) {
+      const children = byParent[String(parentId)] || [];
+      children.forEach(d => {
+        lines.push(`${"  ".repeat(depth)}- ${d.NAME} — ${d.ID}`);
+        walk(d.ID, depth + 1);
+      });
+    }
+    // Корневые — те, у кого нет родителя среди самого списка (PARENT отсутствует в deptList по ID, либо пусто/0)
+    const allIds = new Set(deptList.map(d => String(d.ID)));
+    const rootParents = new Set(deptList.filter(d => !d.PARENT || !allIds.has(String(d.PARENT))).map(d => String(d.PARENT || "0")));
+    rootParents.forEach(p => walk(p, 0));
+
+    return `Дерево всех отделов компании:\n\n${lines.join("\n")}`;
+  },
+  },
+
   find_project: async (input) => {
     const { name } = input;
     const search = name.toLowerCase().trim();
@@ -1115,6 +1147,11 @@ const ANTHROPIC_TOOLS = [
     },
   },
   {
+    name: "list_departments",
+    description: "Показать полную оргструктуру компании — дерево всех отделов с ID. Используй когда спрашивают 'покажи структуру компании', 'сколько у нас отделов', 'дерево отделов', без указания конкретного названия.",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
     name: "find_project",
     description: "Найти проект/коллаб по названию и получить его group_id.",
     input_schema: {
@@ -1554,6 +1591,16 @@ server.tool("find_department",
   { name: z.string().describe("Название отдела или его часть") },
   async ({ name }) => {
     const text = await TOOL_HANDLERS.find_department({ name });
+    return { content: [{ type: "text", text }] };
+  }
+);
+
+// ── 9.6. Полное дерево отделов компании ─────────────────────────────────────
+server.tool("list_departments",
+  "Показать полную оргструктуру компании — дерево всех отделов с ID.",
+  {},
+  async () => {
+    const text = await TOOL_HANDLERS.list_departments({});
     return { content: [{ type: "text", text }] };
   }
 );
