@@ -469,6 +469,39 @@ const TOOL_HANDLERS = {
     ).join("\n");
   },
 
+  find_department: async (input, userId) => {
+    const { name } = input;
+    const search = (name || "").toLowerCase().trim();
+
+    // 1. Ищем отдел по названию через department.get
+    const depts = await bx("department.get", {}, userId);
+    const deptList = Array.isArray(depts) ? depts : [];
+    const matched = deptList.filter(d =>
+      (d.NAME || "").toLowerCase().includes(search) || search.includes((d.NAME || "").toLowerCase())
+    );
+    if (!matched.length) {
+      return `Отдел "${name}" не найден. Доступные отделы: ` +
+        deptList.map(d => d.NAME).join(", ");
+    }
+
+    const deptIds = matched.map(d => d.ID);
+
+    // 2. Ищем сотрудников этих отделов
+    const users = await bx("user.get", {
+      filter: { ACTIVE: true, UF_DEPARTMENT: deptIds },
+      select: ["ID","NAME","LAST_NAME","WORK_POSITION","UF_DEPARTMENT"],
+    }, userId);
+    const userList = Array.isArray(users) ? users : [];
+
+    const deptNames = matched.map(d => d.NAME).join(", ");
+    if (!userList.length) {
+      return `✅ Найден отдел: ${deptNames}. Сотрудников не найдено (возможно, распределение через UF_DEPARTMENT не заполнено).`;
+    }
+
+    return `✅ Отдел: ${deptNames}\n\nСотрудники (${userList.length}):\n\n` +
+      userList.map(u => `ID:${u.ID} | ${u.NAME} ${u.LAST_NAME}${u.WORK_POSITION ? ` | ${u.WORK_POSITION}` : ""}`).join("\n");
+  },
+
   find_project: async (input) => {
     const { name } = input;
     const search = name.toLowerCase().trim();
@@ -1053,6 +1086,15 @@ const ANTHROPIC_TOOLS = [
     input_schema: { type: "object", properties: {} },
   },
   {
+    name: "find_department",
+    description: "Найти отдел компании по названию (например 'маркетинг', 'ОЦП') и получить список сотрудников этого отдела с их ID. Используй когда спрашивают про 'отдел X', 'команда X', загрузку/задачи целого отдела.",
+    input_schema: {
+      type: "object",
+      properties: { name: { type: "string" } },
+      required: ["name"],
+    },
+  },
+  {
     name: "find_project",
     description: "Найти проект/коллаб по названию и получить его group_id.",
     input_schema: {
@@ -1483,6 +1525,16 @@ server.tool("get_all_users",
     ).join("\n");
 
     return { content: [{ type: "text", text: `Сотрудники (${users.length}):\n\n${lines}` }] };
+  }
+);
+
+// ── 9.5. Найти отдел и его сотрудников ─────────────────────────────────────
+server.tool("find_department",
+  "Найти отдел компании по названию (например 'маркетинг', 'ОЦП') и получить список сотрудников этого отдела с их ID.",
+  { name: z.string().describe("Название отдела или его часть") },
+  async ({ name }) => {
+    const text = await TOOL_HANDLERS.find_department({ name });
+    return { content: [{ type: "text", text }] };
   }
 );
 
