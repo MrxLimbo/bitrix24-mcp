@@ -2347,7 +2347,11 @@ app.get("/health", (_, res) =>
 
 // ── OAuth stub для локального приложения Bitrix24 (временно, для теста im.dialog.messages.get) ─────
 app.get("/bitrix/handler", (req, res) => res.status(200).send("OK"));
-app.get("/bitrix/install", (req, res) => res.status(200).send("OK"));
+app.all("/bitrix/install", express.urlencoded({ extended: true }), express.json(), (req, res) => {
+  console.log("🔑 BITRIX INSTALL query:", JSON.stringify(req.query));
+  console.log("🔑 BITRIX INSTALL body:", JSON.stringify(req.body));
+  res.status(200).send("OK");
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Bitrix24 OCP MCP v3.0 | 16 tools | port ${PORT}`));
